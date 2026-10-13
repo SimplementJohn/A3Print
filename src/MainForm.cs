@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Printing;
+using System.Globalization;
 using System.Threading;
 using System.Windows.Forms;
 using System.Windows.Forms.VisualStyles;
@@ -40,6 +41,7 @@ namespace A3Print
         private const int MaxConsecutiveFailures = 3;
         private const int PauseRecheckMs = 5000;
         private static readonly string[] VirtualPrinterHints = { "PDF", "OneNote", "XPS", "Fax" };
+        private static readonly CultureInfo French = new CultureInfo("fr-FR");
 
         private readonly bool dryRun;
         private readonly string folder;
@@ -53,8 +55,13 @@ namespace A3Print
         private Font headerFont;
         private Label questionLabel;
         private Label folderLabel;
-        private DateTimePicker dayPicker;
+        private Button previousDayButton;
+        private Button dayButton;
+        private Button nextDayButton;
         private Button todayButton;
+        private ToolStripDropDown calendarPopup;
+        private MonthCalendar calendar;
+        private DateTime selectedDay = DateTime.Today;
         private BufferedListView list;
         private Label emptyLabel;
         private Button checkAllButton;
@@ -73,7 +80,6 @@ namespace A3Print
         private bool filling;
         private bool fitting;
         private bool followToday = true;
-        private bool settingDay;
         private bool paused;
         private bool closeWhenDone;
         private int okCount;
@@ -109,7 +115,7 @@ namespace A3Print
             Activated += delegate
             {
                 // Fenêtre restée ouverte depuis la veille : on repasse sur le jour courant.
-                if (followToday && !worker.IsBusy && dayPicker.Value.Date != DateTime.Today) RefreshList();
+                if (followToday && !IsBusy && selectedDay != DateTime.Today) RefreshList();
             };
         }
 
@@ -267,33 +273,85 @@ namespace A3Print
             tools.Controls.Add(refreshButton);
             top.Controls.Add(tools, 1, 0);
 
+            top.Controls.Add(BuildDayBar(), 1, 1);
+            return top;
+        }
+
+        // Choix du jour : jour précédent, date (ouvre un calendrier), jour suivant, retour à aujourd'hui.
+        private Control BuildDayBar()
+        {
             FlowLayoutPanel day = NewToolRow();
             day.Margin = new Padding(0, S(8), 0, 0);
-            Label dayCaption = NewCaption("Documents du");
-            day.Controls.Add(dayCaption);
-            dayPicker = new DateTimePicker();
-            dayPicker.Format = DateTimePickerFormat.Short;
-            dayPicker.Width = S(120);
-            dayPicker.Margin = new Padding(S(4), S(2), 0, 0);
-            dayPicker.MaxDate = DateTime.Today.AddYears(1);
-            dayPicker.AccessibleName = "Jour des documents";
-            dayPicker.ValueChanged += delegate
-            {
-                if (settingDay) return;
-                followToday = dayPicker.Value.Date == DateTime.Today;
-                RefreshList();
-            };
-            day.Controls.Add(dayPicker);
-            todayButton = NewSecondaryButton("Aujourd'hui");
-            todayButton.Click += delegate
-            {
-                followToday = true;
-                RefreshList();
-            };
-            day.Controls.Add(todayButton);
-            top.Controls.Add(day, 1, 1);
 
-            return top;
+            Label caption = NewCaption("Documents du");
+            caption.Margin = new Padding(0, S(8), S(8), 0);
+            day.Controls.Add(caption);
+
+            previousDayButton = NewDayButton("\u2039", S(34), "Jour précédent");
+            previousDayButton.Font = new Font("Segoe UI", 12F);
+            previousDayButton.Click += delegate { SetDay(selectedDay.AddDays(-1)); };
+            day.Controls.Add(previousDayButton);
+
+            dayButton = NewDayButton("", S(230), "Jour des documents, ouvre le calendrier");
+            dayButton.Margin = new Padding(S(4), 0, 0, 0);
+            dayButton.Click += delegate { ShowCalendar(); };
+            day.Controls.Add(dayButton);
+
+            nextDayButton = NewDayButton("\u203A", S(34), "Jour suivant");
+            nextDayButton.Font = new Font("Segoe UI", 12F);
+            nextDayButton.Margin = new Padding(S(4), 0, 0, 0);
+            nextDayButton.Click += delegate { SetDay(selectedDay.AddDays(1)); };
+            day.Controls.Add(nextDayButton);
+
+            todayButton = NewDayButton("Aujourd'hui", S(112), "Revenir à aujourd'hui");
+            todayButton.Margin = new Padding(S(8), 0, 0, 0);
+            todayButton.Click += delegate { SetDay(DateTime.Today); };
+            day.Controls.Add(todayButton);
+
+            calendar = new MonthCalendar();
+            calendar.MaxSelectionCount = 1;
+            calendar.DateSelected += delegate(object sender, DateRangeEventArgs e)
+            {
+                calendarPopup.Close();
+                SetDay(e.Start);
+            };
+            ToolStripControlHost host = new ToolStripControlHost(calendar);
+            host.Margin = Padding.Empty;
+            host.Padding = Padding.Empty;
+            host.AutoSize = false;
+            host.Size = calendar.Size;
+            calendarPopup = new ToolStripDropDown();
+            calendarPopup.Padding = Padding.Empty;
+            calendarPopup.Items.Add(host);
+
+            return day;
+        }
+
+        private Button NewDayButton(string text, int width, string accessibleName)
+        {
+            Button button = NewSecondaryButton(text);
+            button.AutoSize = false;
+            button.Size = new Size(width, S(32));
+            button.Padding = Padding.Empty;
+            button.Margin = Padding.Empty;
+            button.AccessibleName = accessibleName;
+            return button;
+        }
+
+        private void ShowCalendar()
+        {
+            calendar.MaxDate = DateTime.Today;
+            calendar.SetDate(selectedDay);
+            calendarPopup.Show(dayButton, new Point(0, dayButton.Height + S(2)));
+        }
+
+        private void SetDay(DateTime day)
+        {
+            if (IsBusy) return;
+            if (day.Date > DateTime.Today) day = DateTime.Today;
+            selectedDay = day.Date;
+            followToday = selectedDay == DateTime.Today;
+            RefreshList();
         }
 
         private FlowLayoutPanel NewToolRow()
@@ -523,6 +581,7 @@ namespace A3Print
             button.ForeColor = Theme.Text;
             button.AutoSize = true;
             button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            button.MinimumSize = new Size(0, S(32));
             button.Padding = new Padding(S(8), S(3), S(8), S(3));
             button.Margin = new Padding(S(8), 0, 0, 0);
             button.Cursor = Cursors.Hand;
@@ -698,14 +757,10 @@ namespace A3Print
 
         private void RefreshList()
         {
-            if (followToday && dayPicker.Value.Date != DateTime.Today)
-            {
-                settingDay = true;
-                dayPicker.Value = DateTime.Today;
-                settingDay = false;
-            }
-            DateTime day = dayPicker.Value.Date;
+            if (followToday) selectedDay = DateTime.Today;
+            DateTime day = selectedDay;
             bool isToday = day == DateTime.Today;
+            dayButton.Text = day.ToString("dddd d MMMM yyyy", French) + "  \u25BE";
             string dayText = isToday ? "aujourd'hui" : "le " + day.ToString("dd/MM/yyyy");
 
             List<DocItem> docs;
@@ -749,7 +804,10 @@ namespace A3Print
                 : "Aucun PDF FA / AV téléchargé " + dayText + ".\n\nTéléchargez vos documents, puis cliquez sur Actualiser.";
             FitColumns();
 
-            todayButton.Enabled = !isToday && !IsBusy;
+            // Aujourd'hui reste cliquable : en vert quand c'est le jour affiché, plutôt que grisé.
+            todayButton.ForeColor = isToday ? Theme.GreenDark : Theme.Text;
+            todayButton.FlatAppearance.BorderColor = isToday ? Theme.Green : Theme.Border;
+            nextDayButton.Enabled = !isToday && !IsBusy;
             folderLabel.Text = folder;
             progress.Value = 0;
             statusLabel.Text = "";
@@ -904,8 +962,10 @@ namespace A3Print
             checkAllButton.Enabled = !busy;
             uncheckAllButton.Enabled = !busy;
             refreshButton.Enabled = !busy;
-            dayPicker.Enabled = !busy;
-            todayButton.Enabled = !busy && dayPicker.Value.Date != DateTime.Today;
+            previousDayButton.Enabled = !busy;
+            dayButton.Enabled = !busy;
+            nextDayButton.Enabled = !busy && selectedDay != DateTime.Today;
+            todayButton.Enabled = !busy;
             printerCombo.Enabled = !busy;
             copiesInput.Enabled = !busy;
             duplexCombo.Enabled = !busy;
