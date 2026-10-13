@@ -2,9 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 
-namespace ImprimLot
+namespace A3Print
 {
-    // Préférences et historique des impressions, dans %LOCALAPPDATA%\ImprimLot.
+    // Préférences et historique des impressions, dans %LOCALAPPDATA%\A3Print.
     internal sealed class Settings
     {
         private readonly string settingsFile;
@@ -18,7 +18,7 @@ namespace ImprimLot
         public Settings()
         {
             string dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ImprimLot");
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "A3Print");
             settingsFile = Path.Combine(dir, "settings.ini");
             historyFile = Path.Combine(dir, "imprimes.txt");
 

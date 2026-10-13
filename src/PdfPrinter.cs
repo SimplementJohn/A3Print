@@ -4,7 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Threading;
 
-namespace ImprimLot
+namespace A3Print
 {
     internal enum DuplexMode
     {

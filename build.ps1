@@ -1,4 +1,4 @@
-# Compile ImprimLot.exe puis l'installeur dist\ImprimLot-Setup.exe (+ .sha256).
+# Compile A3Print.exe puis l'installeur dist\A3Print-Setup-<version>.exe (+ .sha256).
 # Prerequis : Inno Setup 6 (winget install JRSoftware.InnoSetup). Le compilateur C# est celui de Windows.
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -9,7 +9,7 @@ $sumatraUrl = "https://www.sumatrapdfreader.org/dl/rel/$sumatraVersion/SumatraPD
 $assemblyInfo = Get-Content (Join-Path $root 'src\AssemblyInfo.cs') -Raw
 $version = [regex]::Match($assemblyInfo, 'AssemblyVersion\("(\d+\.\d+\.\d+)').Groups[1].Value
 if (-not $version) { throw 'Version introuvable dans src\AssemblyInfo.cs' }
-Write-Host "ImprimLot $version"
+Write-Host "A3Print $version"
 
 $build = Join-Path $root 'build'
 $vendor = Join-Path $root 'vendor'
@@ -35,12 +35,12 @@ if (-not (Test-Path $sumatra)) {
 # Application
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { throw "Compilateur introuvable : $csc" }
-$exeOut = Join-Path $build 'ImprimLot.exe'
+$exeOut = Join-Path $build 'A3Print.exe'
 & $csc /nologo /target:winexe /platform:anycpu /optimize+ /codepage:65001 `
     "/out:$exeOut" `
     "/win32manifest:$(Join-Path $root 'src\app.manifest')" `
     "/win32icon:$(Join-Path $root 'assets\app.ico')" `
-    "/resource:$(Join-Path $root 'assets\logo.png'),ImprimLot.logo.png" `
+    "/resource:$(Join-Path $root 'assets\logo.png'),A3Print.logo.png" `
     /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll `
     (Join-Path $root 'src\*.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Compilation echouee' }
@@ -56,9 +56,10 @@ if (-not $iscc) { throw 'Inno Setup 6 introuvable : winget install JRSoftware.In
 & $iscc /Qp "/DAppVersion=$version" (Join-Path $root 'installer\setup.iss')
 if ($LASTEXITCODE -ne 0) { throw 'Creation de l''installeur echouee' }
 
-$setup = Join-Path $dist 'ImprimLot-Setup.exe'
+$setupName = "A3Print-Setup-$version.exe"
+$setup = Join-Path $dist $setupName
 $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
-Set-Content -Path "$setup.sha256" -Value "$hash  ImprimLot-Setup.exe" -Encoding ascii
+Set-Content -Path "$setup.sha256" -Value "$hash  $setupName" -Encoding ascii
 
 Write-Host "OK : $setup"
 Write-Host "SHA-256 : $hash"

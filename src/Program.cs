@@ -3,7 +3,7 @@ using System.Net;
 using System.Threading;
 using System.Windows.Forms;
 
-namespace ImprimLot
+namespace A3Print
 {
     internal static class Program
     {
@@ -28,11 +28,11 @@ namespace ImprimLot
             Application.SetCompatibleTextRenderingDefault(false);
 
             bool createdNew;
-            using (Mutex mutex = new Mutex(true, "ImprimLot_SingleInstance", out createdNew))
+            using (Mutex mutex = new Mutex(true, "A3Print_SingleInstance", out createdNew))
             {
                 if (!createdNew)
                 {
-                    MessageBox.Show("ImprimLot est déjà ouvert.", "ImprimLot",
+                    MessageBox.Show("A3Print est déjà ouvert.", "A3Print",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }

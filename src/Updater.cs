@@ -9,11 +9,12 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
 
-namespace ImprimLot
+namespace A3Print
 {
     internal sealed class UpdateInfo
     {
         public Version Version;
+        public string SetupName;
         public string SetupUrl;
         public string ShaUrl;
     }
@@ -22,8 +23,8 @@ namespace ImprimLot
     // contrôlé par SHA-256 puis lancé en silencieux.
     internal static class Updater
     {
-        private const string ApiUrl = "https://api.github.com/repos/SimplementJohn/imprimlot/releases/latest";
-        private const string SetupName = "ImprimLot-Setup.exe";
+        private const string ApiUrl = "https://api.github.com/repos/SimplementJohn/A3Print/releases/latest";
+        private const string SetupPrefix = "A3Print-Setup";
 
         public static Version CurrentVersion
         {
@@ -63,8 +64,13 @@ namespace ImprimLot
                 Dictionary<string, object> asset = (Dictionary<string, object>)entry;
                 string name = Convert.ToString(asset["name"]);
                 string url = Convert.ToString(asset["browser_download_url"]);
-                if (string.Equals(name, SetupName, StringComparison.OrdinalIgnoreCase)) info.SetupUrl = url;
-                else if (string.Equals(name, SetupName + ".sha256", StringComparison.OrdinalIgnoreCase)) info.ShaUrl = url;
+                if (!name.StartsWith(SetupPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                {
+                    info.SetupName = name;
+                    info.SetupUrl = url;
+                }
+                else if (name.EndsWith(".exe.sha256", StringComparison.OrdinalIgnoreCase)) info.ShaUrl = url;
             }
 
             if (info.SetupUrl == null || info.ShaUrl == null)
@@ -77,9 +83,9 @@ namespace ImprimLot
         // Télécharge, vérifie et lance l'installeur. L'appelant doit ensuite fermer l'application.
         public static void DownloadAndRun(UpdateInfo info)
         {
-            string dir = Path.Combine(Path.GetTempPath(), "ImprimLot-update");
+            string dir = Path.Combine(Path.GetTempPath(), "A3Print-update");
             Directory.CreateDirectory(dir);
-            string setup = Path.Combine(dir, SetupName);
+            string setup = Path.Combine(dir, Path.GetFileName(info.SetupName));
 
             string expected;
             using (WebClient client = NewClient())
@@ -101,7 +107,7 @@ namespace ImprimLot
         private static WebClient NewClient()
         {
             WebClient client = new WebClient();
-            client.Headers[HttpRequestHeader.UserAgent] = "ImprimLot/" + CurrentVersion;
+            client.Headers[HttpRequestHeader.UserAgent] = "A3Print/" + CurrentVersion;
             client.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
             client.Encoding = Encoding.UTF8;
             return client;

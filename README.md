@@ -1,12 +1,12 @@
-# ImprimLot
+# A3Print
 
 Imprime à la chaîne les PDF du jour du dossier Téléchargements dont le nom commence par `FA` ou `AV`.
-Windows limite l'impression groupée à une quinzaine de fichiers ; ImprimLot en envoie plusieurs centaines,
+Windows limite l'impression groupée à une quinzaine de fichiers ; A3Print en envoie plusieurs centaines,
 un par un, dans l'ordre.
 
 ## Utilisation
 
-1. Lancer ImprimLot : la liste des PDF `FA*` / `AV*` téléchargés aujourd'hui s'affiche, tous cochés.
+1. Lancer A3Print : la liste des PDF `FA*` / `AV*` téléchargés aujourd'hui s'affiche, tous cochés.
 2. Décocher ce qui ne doit pas sortir, choisir l'imprimante (mémorisée ensuite), copies et recto-verso.
 3. **Imprimer**, puis confirmer.
 
@@ -20,7 +20,7 @@ Options de ligne de commande, pour les essais :
 
 ## Installation, désinstallation
 
-`ImprimLot-Setup.exe` s'installe pour l'utilisateur courant, sans droits administrateur.
+`A3Print-Setup-<version>.exe` s'installe pour l'utilisateur courant, sans droits administrateur.
 Désinstallation depuis Paramètres > Applications > Applications installées (ou Panneau de configuration >
 Programmes et fonctionnalités).
 
@@ -46,7 +46,7 @@ Publier une nouvelle version :
 
 Prérequis : Inno Setup 6 (`winget install JRSoftware.InnoSetup`). Le compilateur C# utilisé est celui
 livré avec Windows (.NET Framework 4.8), d'où un code limité à la syntaxe C# 5.
-Résultat : `dist\ImprimLot-Setup.exe` et `dist\ImprimLot-Setup.exe.sha256`.
+Résultat : `dist\A3Print-Setup-<version>.exe` et son `.sha256`.
 
 ## Licences
 

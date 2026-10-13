@@ -5,8 +5,9 @@ using System.Drawing;
 using System.Drawing.Printing;
 using System.Threading;
 using System.Windows.Forms;
+using System.Windows.Forms.VisualStyles;
 
-namespace ImprimLot
+namespace A3Print
 {
     internal sealed class MainForm : Form
     {
@@ -25,6 +26,8 @@ namespace ImprimLot
             public string Error;
         }
 
+        private const string AppName = "A3Print";
+        private const int StateColumn = 3;
         private static readonly string[] VirtualPrinterHints = { "PDF", "OneNote", "XPS", "Fax" };
 
         private readonly bool dryRun;
@@ -33,9 +36,12 @@ namespace ImprimLot
         private readonly Dictionary<DocItem, ListViewItem> rows = new Dictionary<DocItem, ListViewItem>();
         private readonly BackgroundWorker worker = new BackgroundWorker();
 
+        private float scale = 1F;
+        private Font headerFont;
         private Label questionLabel;
         private Label folderLabel;
-        private ListView list;
+        private BufferedListView list;
+        private Label emptyLabel;
         private Button checkAllButton;
         private Button uncheckAllButton;
         private Button refreshButton;
@@ -44,12 +50,12 @@ namespace ImprimLot
         private ComboBox duplexCombo;
         private Button printButton;
         private Button cancelButton;
-        private ProgressBar progress;
+        private ThinProgress progress;
         private Label statusLabel;
-        private TextBox log;
         private LinkLabel updateLink;
 
         private bool filling;
+        private bool fitting;
         private int okCount;
         private int failCount;
         private int jobTotal;
@@ -75,132 +81,220 @@ namespace ImprimLot
             Shown += delegate { CheckForUpdate(false); };
         }
 
+        // Taille en pixels pour le DPI de l'écran.
+        private int S(int value)
+        {
+            return (int)Math.Round(value * scale);
+        }
+
         private void BuildUi()
         {
-            Text = "ImprimLot " + Updater.CurrentVersion + (dryRun ? "  [SIMULATION - rien n'est imprimé]" : "");
-            Font = new Font("Segoe UI", 9F);
-            AutoScaleMode = AutoScaleMode.Dpi;
+            using (Graphics g = CreateGraphics())
+            {
+                scale = g.DpiX / 96F;
+            }
+
+            Text = AppName + (dryRun ? "  [SIMULATION - rien n'est imprimé]" : "");
+            Font = new Font("Segoe UI", 9.75F);
+            headerFont = new Font("Segoe UI", 8F, FontStyle.Bold);
+            AutoScaleMode = AutoScaleMode.None;
+            BackColor = Theme.Background;
+            ForeColor = Theme.Text;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(760, 640);
-            MinimumSize = new Size(620, 520);
+            ClientSize = new Size(S(880), S(680));
+            MinimumSize = new Size(S(720), S(560));
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
             TableLayoutPanel root = new TableLayoutPanel();
             root.Dock = DockStyle.Fill;
-            root.Padding = new Padding(12);
             root.ColumnCount = 1;
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            root.RowCount = 7;
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            root.RowCount = 3;
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, S(88)));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 110F));
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             Controls.Add(root);
 
-            // Bandeau sombre : le logo a un texte blanc, illisible sur fond clair.
+            root.Controls.Add(BuildHeader(), 0, 0);
+            root.Controls.Add(BuildBody(), 0, 1);
+            root.Controls.Add(BuildFooter(), 0, 2);
+
+            AcceptButton = printButton;
+        }
+
+        // Bandeau ardoise : le logo a un texte blanc, illisible sur fond clair.
+        private Control BuildHeader()
+        {
             TableLayoutPanel header = new TableLayoutPanel();
             header.Dock = DockStyle.Fill;
-            header.AutoSize = true;
-            header.BackColor = Color.FromArgb(47, 58, 69);
-            header.Padding = new Padding(8);
-            header.Margin = new Padding(3, 0, 3, 8);
+            header.Margin = Padding.Empty;
+            header.BackColor = Theme.Slate;
             header.ColumnCount = 2;
             header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             header.RowCount = 2;
-            header.RowStyles.Add(new RowStyle(SizeType.Percent, 55F));
-            header.RowStyles.Add(new RowStyle(SizeType.Percent, 45F));
+            header.RowStyles.Add(new RowStyle(SizeType.Percent, 56F));
+            header.RowStyles.Add(new RowStyle(SizeType.Percent, 44F));
 
             PictureBox logoBox = new PictureBox();
             logoBox.SizeMode = PictureBoxSizeMode.Zoom;
-            logoBox.Size = new Size(144, 96);
-            logoBox.Margin = new Padding(0, 0, 12, 0);
-            System.IO.Stream logo = typeof(MainForm).Assembly.GetManifestResourceStream("ImprimLot.logo.png");
+            logoBox.Size = new Size(S(108), S(72));
+            logoBox.Margin = new Padding(S(20), S(8), S(14), S(8));
+            System.IO.Stream logo = typeof(MainForm).Assembly.GetManifestResourceStream("A3Print.logo.png");
             if (logo != null) logoBox.Image = Image.FromStream(logo);
             header.Controls.Add(logoBox, 0, 0);
             header.SetRowSpan(logoBox, 2);
 
+            Label title = new Label();
+            title.Text = AppName;
+            title.AutoSize = true;
+            title.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
+            title.Font = new Font("Segoe UI", 17F, FontStyle.Bold);
+            title.ForeColor = Color.White;
+            title.Margin = new Padding(0);
+            header.Controls.Add(title, 1, 0);
+
+            Label subtitle = new Label();
+            subtitle.Text = "Impression en lot des PDF FA / AV du jour";
+            subtitle.AutoSize = true;
+            subtitle.Anchor = AnchorStyles.Left | AnchorStyles.Top;
+            subtitle.ForeColor = Theme.HeaderMuted;
+            subtitle.Margin = new Padding(S(3), S(1), 0, 0);
+            header.Controls.Add(subtitle, 1, 1);
+
+            return header;
+        }
+
+        private Control BuildBody()
+        {
+            TableLayoutPanel body = new TableLayoutPanel();
+            body.Dock = DockStyle.Fill;
+            body.Margin = Padding.Empty;
+            body.Padding = new Padding(S(20), S(16), S(20), S(8));
+            body.ColumnCount = 1;
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            body.RowCount = 4;
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            // Question + actions sur la liste
+            TableLayoutPanel top = new TableLayoutPanel();
+            top.Dock = DockStyle.Fill;
+            top.AutoSize = true;
+            top.Margin = new Padding(0, 0, 0, S(10));
+            top.ColumnCount = 2;
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            top.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            top.RowCount = 2;
+            top.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            top.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
             questionLabel = new Label();
             questionLabel.AutoSize = true;
-            questionLabel.Anchor = AnchorStyles.Left | AnchorStyles.Bottom;
-            questionLabel.Font = new Font(Font.FontFamily, 13F, FontStyle.Bold);
-            questionLabel.ForeColor = Color.White;
-            questionLabel.Margin = new Padding(3, 0, 3, 2);
-            header.Controls.Add(questionLabel, 1, 0);
+            questionLabel.Font = new Font("Segoe UI", 15F, FontStyle.Bold);
+            questionLabel.Margin = new Padding(0);
+            top.Controls.Add(questionLabel, 0, 0);
 
             folderLabel = new Label();
-            folderLabel.AutoSize = true;
-            folderLabel.Anchor = AnchorStyles.Left | AnchorStyles.Top;
-            folderLabel.ForeColor = Color.FromArgb(200, 208, 215);
-            folderLabel.Margin = new Padding(3, 2, 3, 0);
-            header.Controls.Add(folderLabel, 1, 1);
-            root.Controls.Add(header, 0, 0);
+            folderLabel.AutoSize = false;
+            folderLabel.AutoEllipsis = true;
+            folderLabel.Dock = DockStyle.Fill;
+            folderLabel.Height = S(20);
+            folderLabel.ForeColor = Theme.Muted;
+            folderLabel.Margin = new Padding(S(2), S(2), 0, 0);
+            top.Controls.Add(folderLabel, 0, 1);
 
-            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-
-            list = new ListView();
-            list.Dock = DockStyle.Fill;
-            list.View = View.Details;
-            list.CheckBoxes = true;
-            list.FullRowSelect = true;
-            list.HideSelection = false;
-            list.HeaderStyle = ColumnHeaderStyle.Nonclickable;
-            list.Columns.Add("Document", 380);
-            list.Columns.Add("Taille", 80, HorizontalAlignment.Right);
-            list.Columns.Add("Heure", 70);
-            list.Columns.Add("État", 180);
-            list.ItemChecked += delegate { if (!filling) UpdateQuestion(); };
-            root.Controls.Add(list, 0, 1);
-
-            FlowLayoutPanel listButtons = NewRow();
-            checkAllButton = NewButton("Tout cocher");
+            FlowLayoutPanel tools = new FlowLayoutPanel();
+            tools.AutoSize = true;
+            tools.WrapContents = false;
+            tools.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
+            tools.Margin = Padding.Empty;
+            checkAllButton = NewSecondaryButton("Tout cocher");
             checkAllButton.Click += delegate { SetAllChecked(true); };
-            uncheckAllButton = NewButton("Tout décocher");
+            uncheckAllButton = NewSecondaryButton("Tout décocher");
             uncheckAllButton.Click += delegate { SetAllChecked(false); };
-            refreshButton = NewButton("Actualiser");
+            refreshButton = NewSecondaryButton("Actualiser");
             refreshButton.Click += delegate { RefreshList(); };
-            listButtons.Controls.Add(checkAllButton);
-            listButtons.Controls.Add(uncheckAllButton);
-            listButtons.Controls.Add(refreshButton);
-            root.Controls.Add(listButtons, 0, 2);
+            tools.Controls.Add(checkAllButton);
+            tools.Controls.Add(uncheckAllButton);
+            tools.Controls.Add(refreshButton);
+            top.Controls.Add(tools, 1, 0);
+            top.SetRowSpan(tools, 2);
+            body.Controls.Add(top, 0, 0);
 
-            FlowLayoutPanel options = NewRow();
-            options.Controls.Add(NewCaption("Imprimante :"));
+            body.Controls.Add(BuildListCard(), 0, 1);
+
+            // Options d'impression
+            FlowLayoutPanel options = new FlowLayoutPanel();
+            options.Dock = DockStyle.Fill;
+            options.AutoSize = true;
+            options.WrapContents = true;
+            options.BackColor = Theme.Card;
+            options.Padding = new Padding(S(10), S(8), S(10), S(8));
+            options.Margin = new Padding(0, S(12), 0, 0);
+            Theme.AddBorder(options);
+
+            options.Controls.Add(NewCaption("Imprimante"));
             printerCombo = new ComboBox();
             printerCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            printerCombo.Width = 300;
+            printerCombo.FlatStyle = FlatStyle.Flat;
+            printerCombo.Width = S(310);
+            printerCombo.Margin = new Padding(S(3), S(3), S(18), S(3));
             options.Controls.Add(printerCombo);
-            options.Controls.Add(NewCaption("Copies :"));
+
+            options.Controls.Add(NewCaption("Copies"));
             copiesInput = new NumericUpDown();
             copiesInput.Minimum = 1;
             copiesInput.Maximum = 99;
-            copiesInput.Width = 50;
+            copiesInput.Width = S(54);
+            copiesInput.Margin = new Padding(S(3), S(3), S(18), S(3));
             options.Controls.Add(copiesInput);
+
+            options.Controls.Add(NewCaption("Mode"));
             duplexCombo = new ComboBox();
             duplexCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            duplexCombo.Width = 190;
+            duplexCombo.FlatStyle = FlatStyle.Flat;
+            duplexCombo.Width = S(200);
             duplexCombo.Items.AddRange(new object[]
             {
                 "Réglage de l'imprimante", "Recto seul", "Recto-verso (bord long)", "Recto-verso (bord court)"
             });
             options.Controls.Add(duplexCombo);
-            root.Controls.Add(options, 0, 3);
+            body.Controls.Add(options, 0, 2);
 
+            // Progression + boutons
             TableLayoutPanel run = new TableLayoutPanel();
             run.Dock = DockStyle.Fill;
             run.AutoSize = true;
+            run.Margin = new Padding(0, S(14), 0, 0);
             run.ColumnCount = 3;
-            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             run.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             run.RowCount = 2;
-            run.Margin = new Padding(0, 6, 0, 0);
-            printButton = NewButton("Imprimer");
-            printButton.Font = new Font(Font, FontStyle.Bold);
-            printButton.Click += PrintButton_Click;
-            cancelButton = NewButton("Annuler");
+            run.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            run.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
+            progress = new ThinProgress();
+            progress.Height = S(6);
+            progress.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+            progress.Margin = new Padding(0, 0, S(16), S(4));
+            run.Controls.Add(progress, 0, 0);
+
+            statusLabel = new Label();
+            statusLabel.AutoSize = false;
+            statusLabel.AutoEllipsis = true;
+            statusLabel.Dock = DockStyle.Fill;
+            statusLabel.ForeColor = Theme.Muted;
+            statusLabel.Margin = new Padding(0, 0, S(16), 0);
+            run.Controls.Add(statusLabel, 0, 1);
+
+            cancelButton = NewSecondaryButton("Annuler");
+            cancelButton.AutoSize = false;
+            cancelButton.Size = new Size(S(104), S(42));
+            cancelButton.Margin = new Padding(0, 0, S(8), 0);
             cancelButton.Enabled = false;
             cancelButton.Click += delegate
             {
@@ -208,64 +302,241 @@ namespace ImprimLot
                 statusLabel.Text = "Annulation après le document en cours...";
                 worker.CancelAsync();
             };
-            progress = new ProgressBar();
-            progress.Dock = DockStyle.Fill;
-            progress.Margin = new Padding(8, 6, 3, 6);
-            statusLabel = new Label();
-            statusLabel.AutoSize = true;
-            statusLabel.Margin = new Padding(3, 0, 3, 4);
-            run.Controls.Add(printButton, 0, 0);
             run.Controls.Add(cancelButton, 1, 0);
-            run.Controls.Add(progress, 2, 0);
-            run.Controls.Add(statusLabel, 0, 1);
-            run.SetColumnSpan(statusLabel, 3);
-            root.Controls.Add(run, 0, 4);
+            run.SetRowSpan(cancelButton, 2);
 
-            log = new TextBox();
-            log.Dock = DockStyle.Fill;
-            log.Multiline = true;
-            log.ReadOnly = true;
-            log.ScrollBars = ScrollBars.Vertical;
-            log.BackColor = SystemColors.Window;
-            root.Controls.Add(log, 0, 5);
+            printButton = new Button();
+            printButton.Text = "Imprimer";
+            printButton.FlatStyle = FlatStyle.Flat;
+            printButton.FlatAppearance.BorderSize = 0;
+            printButton.FlatAppearance.MouseOverBackColor = Theme.GreenDark;
+            printButton.FlatAppearance.MouseDownBackColor = Theme.GreenDark;
+            printButton.BackColor = Theme.Green;
+            printButton.ForeColor = Color.White;
+            printButton.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
+            printButton.Size = new Size(S(210), S(42));
+            printButton.Margin = Padding.Empty;
+            printButton.Cursor = Cursors.Hand;
+            printButton.EnabledChanged += delegate
+            {
+                printButton.BackColor = printButton.Enabled ? Theme.Green : Theme.Disabled;
+            };
+            printButton.Click += PrintButton_Click;
+            run.Controls.Add(printButton, 2, 0);
+            run.SetRowSpan(printButton, 2);
+            body.Controls.Add(run, 0, 3);
+
+            return body;
+        }
+
+        private Control BuildListCard()
+        {
+            Panel card = new Panel();
+            card.Dock = DockStyle.Fill;
+            card.Margin = Padding.Empty;
+            card.Padding = new Padding(1);
+            card.BackColor = Theme.Border;
+
+            // Hauteur de ligne : imposée par une liste d'images vide.
+            ImageList rowHeight = new ImageList();
+            rowHeight.ImageSize = new Size(1, S(30));
+
+            list = new BufferedListView();
+            list.Dock = DockStyle.Fill;
+            list.BorderStyle = BorderStyle.None;
+            list.View = View.Details;
+            list.CheckBoxes = true;
+            list.FullRowSelect = true;
+            list.HideSelection = true;
+            list.MultiSelect = false;
+            list.OwnerDraw = true;
+            list.SmallImageList = rowHeight;
+            list.HeaderStyle = ColumnHeaderStyle.Nonclickable;
+            list.BackColor = Theme.Card;
+            list.Columns.Add("Document", S(380));
+            list.Columns.Add("Taille", S(90), HorizontalAlignment.Right);
+            list.Columns.Add("Heure", S(80), HorizontalAlignment.Right);
+            list.Columns.Add("État", S(250));
+            list.DrawColumnHeader += List_DrawColumnHeader;
+            list.DrawSubItem += List_DrawSubItem;
+            list.ItemCheck += List_ItemCheck;
+            list.ItemChecked += delegate { if (!filling) UpdateQuestion(); };
+            list.MouseClick += List_MouseClick;
+            list.ClientSizeChanged += delegate { FitColumns(); };
+            list.ColumnWidthChanging += delegate(object sender, ColumnWidthChangingEventArgs e)
+            {
+                if (fitting) return;
+                e.NewWidth = list.Columns[e.ColumnIndex].Width;
+                e.Cancel = true;
+            };
+
+            emptyLabel = new Label();
+            emptyLabel.Dock = DockStyle.Fill;
+            emptyLabel.BackColor = Theme.Card;
+            emptyLabel.ForeColor = Theme.Muted;
+            emptyLabel.Font = new Font("Segoe UI", 11F);
+            emptyLabel.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
+            emptyLabel.Text = "Aucun PDF FA / AV téléchargé aujourd'hui.\n\n" +
+                              "Téléchargez vos documents, puis cliquez sur Actualiser.";
+
+            card.Controls.Add(list);
+            card.Controls.Add(emptyLabel);
+            return card;
+        }
+
+        private Control BuildFooter()
+        {
+            TableLayoutPanel footer = new TableLayoutPanel();
+            footer.Dock = DockStyle.Fill;
+            footer.AutoSize = true;
+            footer.Margin = Padding.Empty;
+            footer.Padding = new Padding(S(20), S(4), S(20), S(10));
+            footer.ColumnCount = 2;
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            Label version = new Label();
+            version.Text = AppName + " " + Updater.CurrentVersion;
+            version.AutoSize = true;
+            version.ForeColor = Theme.Muted;
+            version.Margin = Padding.Empty;
+            footer.Controls.Add(version, 0, 0);
 
             updateLink = new LinkLabel();
-            updateLink.AutoSize = true;
             updateLink.Text = "Rechercher une mise à jour";
-            updateLink.Margin = new Padding(3, 6, 3, 0);
+            updateLink.AutoSize = true;
+            updateLink.LinkColor = Theme.GreenDark;
+            updateLink.ActiveLinkColor = Theme.Green;
+            updateLink.LinkBehavior = LinkBehavior.HoverUnderline;
+            updateLink.Margin = Padding.Empty;
             updateLink.LinkClicked += delegate { CheckForUpdate(true); };
-            root.Controls.Add(updateLink, 0, 6);
+            footer.Controls.Add(updateLink, 1, 0);
 
-            AcceptButton = printButton;
+            return footer;
         }
 
-        private static FlowLayoutPanel NewRow()
-        {
-            FlowLayoutPanel row = new FlowLayoutPanel();
-            row.AutoSize = true;
-            row.Dock = DockStyle.Fill;
-            row.WrapContents = true;
-            row.Margin = new Padding(0, 6, 0, 0);
-            return row;
-        }
-
-        private static Button NewButton(string text)
+        private Button NewSecondaryButton(string text)
         {
             Button button = new Button();
             button.Text = text;
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderColor = Theme.Border;
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.MouseOverBackColor = Theme.HeaderRow;
+            button.BackColor = Theme.Card;
+            button.ForeColor = Theme.Text;
             button.AutoSize = true;
             button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            button.Padding = new Padding(8, 2, 8, 2);
+            button.Padding = new Padding(S(8), S(3), S(8), S(3));
+            button.Margin = new Padding(S(8), 0, 0, 0);
+            button.Cursor = Cursors.Hand;
             return button;
         }
 
-        private static Label NewCaption(string text)
+        private Label NewCaption(string text)
         {
             Label label = new Label();
             label.Text = text;
             label.AutoSize = true;
-            label.Margin = new Padding(3, 7, 0, 0);
+            label.ForeColor = Theme.Muted;
+            label.Margin = new Padding(S(3), S(7), S(2), 0);
             return label;
+        }
+
+        private void List_DrawColumnHeader(object sender, DrawListViewColumnHeaderEventArgs e)
+        {
+            using (SolidBrush back = new SolidBrush(Theme.HeaderRow))
+            {
+                e.Graphics.FillRectangle(back, e.Bounds);
+            }
+            using (Pen line = new Pen(Theme.Border))
+            {
+                e.Graphics.DrawLine(line, e.Bounds.Left, e.Bounds.Bottom - 1, e.Bounds.Right, e.Bounds.Bottom - 1);
+            }
+
+            Rectangle text = CellTextBounds(e.Bounds, e.ColumnIndex);
+            TextRenderer.DrawText(e.Graphics, e.Header.Text.ToUpper(), headerFont, text, Theme.Muted,
+                CellFlags(e.Header.TextAlign));
+        }
+
+        private void List_DrawSubItem(object sender, DrawListViewSubItemEventArgs e)
+        {
+            // Pour la colonne 0, Bounds couvre toute la ligne.
+            Rectangle bounds = e.Bounds;
+            if (e.ColumnIndex == 0) bounds.Width = list.Columns[0].Width;
+
+            Color backColor = e.Item.Selected ? Theme.SelectedRow : (e.ItemIndex % 2 == 0 ? Theme.Card : Theme.AltRow);
+            using (SolidBrush back = new SolidBrush(backColor))
+            {
+                e.Graphics.FillRectangle(back, bounds);
+            }
+
+            if (e.ColumnIndex == 0)
+            {
+                CheckBoxState state = e.Item.Checked ? CheckBoxState.CheckedNormal : CheckBoxState.UncheckedNormal;
+                Size glyph = CheckBoxRenderer.GetGlyphSize(e.Graphics, state);
+                CheckBoxRenderer.DrawCheckBox(e.Graphics,
+                    new Point(bounds.Left + S(10), bounds.Top + (bounds.Height - glyph.Height) / 2), state);
+            }
+
+            bool dimmed = e.Item.ForeColor == Theme.Muted;
+            Color color = dimmed ? Theme.Muted : Theme.Text;
+            string text = e.SubItem.Text;
+            if (e.ColumnIndex == StateColumn)
+            {
+                color = e.Item.ForeColor;
+                if (text.Length > 0) text = "●  " + text;
+            }
+            else if (e.ColumnIndex != 0)
+            {
+                color = Theme.Muted;
+            }
+
+            TextRenderer.DrawText(e.Graphics, text, list.Font, CellTextBounds(bounds, e.ColumnIndex), color,
+                CellFlags(e.Header.TextAlign));
+        }
+
+        private Rectangle CellTextBounds(Rectangle bounds, int column)
+        {
+            int left = column == 0 ? S(36) : S(10);
+            return new Rectangle(bounds.Left + left, bounds.Top, Math.Max(0, bounds.Width - left - S(10)), bounds.Height);
+        }
+
+        private static TextFormatFlags CellFlags(HorizontalAlignment align)
+        {
+            TextFormatFlags flags = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis |
+                                    TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix;
+            return flags | (align == HorizontalAlignment.Right ? TextFormatFlags.Right : TextFormatFlags.Left);
+        }
+
+        // La colonne Document occupe la largeur restante.
+        private void FitColumns()
+        {
+            if (fitting || list.Columns.Count == 0) return;
+            fitting = true;
+            int others = 0;
+            for (int i = 1; i < list.Columns.Count; i++)
+            {
+                others += list.Columns[i].Width;
+            }
+            int width = Math.Max(S(180), list.ClientSize.Width - others);
+            if (list.Columns[0].Width != width) list.Columns[0].Width = width;
+            fitting = false;
+        }
+
+        // Pendant une impression les cases sont verrouillées.
+        private void List_ItemCheck(object sender, ItemCheckEventArgs e)
+        {
+            if (worker.IsBusy && !filling) e.NewValue = e.CurrentValue;
+        }
+
+        // Un clic n'importe où sur la ligne coche ou décoche ; la case elle-même est gérée par Windows.
+        private void List_MouseClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || worker.IsBusy) return;
+            ListViewHitTestInfo hit = list.HitTest(e.Location);
+            if (hit.Item == null || hit.Location == ListViewHitTestLocations.StateImage) return;
+            hit.Item.Checked = !hit.Item.Checked;
         }
 
         private void LoadPrinters()
@@ -282,7 +553,7 @@ namespace ImprimLot
             }
             catch (Exception ex)
             {
-                AppendLog("Liste des imprimantes illisible : " + ex.Message);
+                statusLabel.Text = "Liste des imprimantes illisible : " + ex.Message;
             }
 
             // Jamais d'imprimante virtuelle présélectionnée : 300 fenêtres « Enregistrer sous » sinon.
@@ -309,6 +580,7 @@ namespace ImprimLot
         private void RefreshList()
         {
             List<DocItem> docs;
+            string error = null;
             try
             {
                 docs = DocumentScanner.Scan(folder, DateTime.Today);
@@ -316,7 +588,7 @@ namespace ImprimLot
             catch (Exception ex)
             {
                 docs = new List<DocItem>();
-                AppendLog("Lecture du dossier impossible : " + ex.Message);
+                error = "Lecture du dossier impossible : " + ex.Message;
             }
 
             filling = true;
@@ -332,16 +604,20 @@ namespace ImprimLot
                 row.SubItems.Add(already ? "Déjà imprimé" : "");
                 row.Checked = !already;
                 row.Tag = doc;
-                if (already) row.ForeColor = SystemColors.GrayText;
+                row.ForeColor = already ? Theme.Muted : Theme.Text;
                 list.Items.Add(row);
                 rows[doc] = row;
             }
             list.EndUpdate();
             filling = false;
 
-            folderLabel.Text = "PDF commençant par FA ou AV, du " + DateTime.Today.ToString("dd/MM/yyyy") + ", dans " + folder;
+            list.Visible = docs.Count > 0;
+            emptyLabel.Visible = docs.Count == 0;
+            FitColumns();
+
+            folderLabel.Text = folder + "  ·  " + DateTime.Today.ToString("dd/MM/yyyy");
             progress.Value = 0;
-            statusLabel.Text = "";
+            statusLabel.Text = error ?? "";
             UpdateQuestion();
         }
 
@@ -367,16 +643,17 @@ namespace ImprimLot
             int count = list.CheckedItems.Count;
             if (list.Items.Count == 0)
             {
-                questionLabel.Text = "Aucun PDF FA / AV téléchargé aujourd'hui.";
+                questionLabel.Text = "Rien à imprimer";
             }
             else if (count == 0)
             {
-                questionLabel.Text = "Aucun document coché (" + list.Items.Count + " trouvés).";
+                questionLabel.Text = "Aucun document coché sur " + list.Items.Count;
             }
             else
             {
                 questionLabel.Text = "Imprimer " + (count == 1 ? "ce document" : "ces " + count + " documents") + " ?";
             }
+            printButton.Text = count > 0 ? "Imprimer (" + count + ")" : "Imprimer";
             printButton.Enabled = count > 0 && !worker.IsBusy;
         }
 
@@ -394,7 +671,7 @@ namespace ImprimLot
 
             if (printerCombo.SelectedItem == null)
             {
-                MessageBox.Show(this, "Choisissez d'abord une imprimante.", "ImprimLot",
+                MessageBox.Show(this, "Choisissez d'abord une imprimante.", AppName,
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 printerCombo.DroppedDown = true;
                 return;
@@ -412,7 +689,7 @@ namespace ImprimLot
                 icon = MessageBoxIcon.Warning;
             }
             if (dryRun) message += "\n\n(Simulation : rien ne sera imprimé.)";
-            if (MessageBox.Show(this, message, "ImprimLot", MessageBoxButtons.YesNo, icon) != DialogResult.Yes)
+            if (MessageBox.Show(this, message, AppName, MessageBoxButtons.YesNo, icon) != DialogResult.Yes)
             {
                 return;
             }
@@ -428,14 +705,12 @@ namespace ImprimLot
             progress.Maximum = jobTotal;
             progress.Value = 0;
             statusLabel.Text = "Impression en cours...";
-            AppendLog("--- " + DateTime.Now.ToString("HH:mm:ss") + " : " + jobTotal + " document(s) vers " + job.Printer + " ---");
             SetBusy(true);
             worker.RunWorkerAsync(job);
         }
 
         private void SetBusy(bool busy)
         {
-            list.Enabled = !busy;
             checkAllButton.Enabled = !busy;
             uncheckAllButton.Enabled = !busy;
             refreshButton.Enabled = !busy;
@@ -474,23 +749,22 @@ namespace ImprimLot
             if (result.Ok)
             {
                 okCount++;
-                row.SubItems[3].Text = dryRun ? "Simulé" : "Imprimé";
-                row.ForeColor = Color.ForestGreen;
+                row.SubItems[StateColumn].Text = dryRun ? "Simulé" : "Imprimé";
+                row.ForeColor = Theme.Success;
                 row.Checked = false;
                 if (!dryRun) settings.MarkPrinted(result.Doc);
             }
             else
             {
                 failCount++;
-                row.SubItems[3].Text = "Échec : " + result.Error;
-                row.ForeColor = Color.Firebrick;
-                AppendLog("ÉCHEC  " + result.Doc.Name + " : " + result.Error);
+                row.SubItems[StateColumn].Text = "Échec : " + result.Error;
+                row.ForeColor = Theme.Danger;
             }
             filling = false;
 
             row.EnsureVisible();
-            progress.Value = Math.Min(progress.Maximum, e.ProgressPercentage);
-            statusLabel.Text = e.ProgressPercentage + " / " + jobTotal + "  -  " + result.Doc.Name;
+            progress.Value = e.ProgressPercentage;
+            statusLabel.Text = e.ProgressPercentage + " / " + jobTotal + "  ·  " + result.Doc.Name;
         }
 
         private void Worker_Completed(object sender, RunWorkerCompletedEventArgs e)
@@ -499,23 +773,17 @@ namespace ImprimLot
             UpdateQuestion();
 
             string summary = okCount + " imprimé(s), " + failCount + " en échec";
-            if (e.Cancelled) summary += ", annulé avant la fin (" + (jobTotal - okCount - failCount) + " non traité(s))";
             if (e.Error != null) summary += ". Erreur : " + e.Error.Message;
+            else if (e.Cancelled) summary += ", annulé avant la fin (" + (jobTotal - okCount - failCount) + " non traité(s))";
             statusLabel.Text = "Terminé : " + summary + ".";
-            AppendLog("Terminé : " + summary + ".");
 
             string text = summary + ".";
             if (failCount > 0)
             {
                 text += "\n\nLes documents en échec restent cochés : cliquez de nouveau sur Imprimer pour réessayer.";
             }
-            MessageBox.Show(this, text, "ImprimLot", MessageBoxButtons.OK,
+            MessageBox.Show(this, text, AppName, MessageBoxButtons.OK,
                 failCount > 0 || e.Error != null ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
-        }
-
-        private void AppendLog(string line)
-        {
-            log.AppendText(line + Environment.NewLine);
         }
 
         private void CheckForUpdate(bool manual)
@@ -554,12 +822,12 @@ namespace ImprimLot
                 if (!manual) return;
                 if (error != null)
                 {
-                    MessageBox.Show(this, "Vérification impossible : " + error.Message, "ImprimLot",
+                    MessageBox.Show(this, "Vérification impossible : " + error.Message, AppName,
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 else
                 {
-                    MessageBox.Show(this, "ImprimLot " + Updater.CurrentVersion + " est à jour.", "ImprimLot",
+                    MessageBox.Show(this, AppName + " " + Updater.CurrentVersion + " est à jour.", AppName,
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 return;
@@ -598,7 +866,7 @@ namespace ImprimLot
                         Enabled = true;
                         Cursor = Cursors.Default;
                         statusLabel.Text = "";
-                        MessageBox.Show(this, "Mise à jour impossible : " + failure.Message, "ImprimLot",
+                        MessageBox.Show(this, "Mise à jour impossible : " + failure.Message, AppName,
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     });
                 }
@@ -614,7 +882,7 @@ namespace ImprimLot
             {
                 DialogResult answer = MessageBox.Show(this,
                     "Une impression est en cours. Quitter quand même ?\nLes documents déjà envoyés seront imprimés.",
-                    "ImprimLot", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (answer != DialogResult.Yes)
                 {
                     e.Cancel = true;
