@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Printing;
 using System.Threading;
@@ -26,20 +27,34 @@ namespace A3Print
             public string Error;
         }
 
+        private sealed class PauseInfo
+        {
+            public bool Paused;
+            public string Reason;
+            public bool AutoResume;
+        }
+
         private const string AppName = "A3Print";
         private const int StateColumn = 3;
+        private const int PrinterCheckEvery = 5;
+        private const int MaxConsecutiveFailures = 3;
+        private const int PauseRecheckMs = 5000;
         private static readonly string[] VirtualPrinterHints = { "PDF", "OneNote", "XPS", "Fax" };
 
         private readonly bool dryRun;
         private readonly string folder;
         private readonly Settings settings = new Settings();
+        private readonly BatchJournal journal;
         private readonly Dictionary<DocItem, ListViewItem> rows = new Dictionary<DocItem, ListViewItem>();
         private readonly BackgroundWorker worker = new BackgroundWorker();
+        private readonly ManualResetEvent resumeSignal = new ManualResetEvent(false);
 
         private float scale = 1F;
         private Font headerFont;
         private Label questionLabel;
         private Label folderLabel;
+        private DateTimePicker dayPicker;
+        private Button todayButton;
         private BufferedListView list;
         private Label emptyLabel;
         private Button checkAllButton;
@@ -48,6 +63,7 @@ namespace A3Print
         private ComboBox printerCombo;
         private NumericUpDown copiesInput;
         private ComboBox duplexCombo;
+        private NoticeBar notice;
         private Button printButton;
         private Button cancelButton;
         private ThinProgress progress;
@@ -56,14 +72,24 @@ namespace A3Print
 
         private bool filling;
         private bool fitting;
+        private bool followToday = true;
+        private bool settingDay;
+        private bool paused;
+        private bool closeWhenDone;
         private int okCount;
         private int failCount;
         private int jobTotal;
+        private string jobPrinter = "";
+
+        private UpdateInfo pendingUpdate;
+        private bool updating;
+        private volatile bool updateCancelled;
 
         public MainForm(bool dryRun, string folder)
         {
             this.dryRun = dryRun;
             this.folder = string.IsNullOrEmpty(folder) ? DocumentScanner.GetDownloadsFolder() : folder;
+            journal = new BatchJournal(!dryRun);
 
             BuildUi();
 
@@ -77,8 +103,14 @@ namespace A3Print
             copiesInput.Value = settings.Copies;
             duplexCombo.SelectedIndex = (int)settings.Duplex;
             RefreshList();
+            ShowInterruptedBatch();
 
             Shown += delegate { CheckForUpdate(false); };
+            Activated += delegate
+            {
+                // Fenêtre restée ouverte depuis la veille : on repasse sur le jour courant.
+                if (followToday && !worker.IsBusy && dayPicker.Value.Date != DateTime.Today) RefreshList();
+            };
         }
 
         // Taille en pixels pour le DPI de l'écran.
@@ -101,8 +133,8 @@ namespace A3Print
             BackColor = Theme.Background;
             ForeColor = Theme.Text;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(S(880), S(680));
-            MinimumSize = new Size(S(720), S(560));
+            ClientSize = new Size(S(900), S(720));
+            MinimumSize = new Size(S(760), S(600));
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
             TableLayoutPanel root = new TableLayoutPanel();
@@ -140,6 +172,7 @@ namespace A3Print
             logoBox.SizeMode = PictureBoxSizeMode.Zoom;
             logoBox.Size = new Size(S(108), S(72));
             logoBox.Margin = new Padding(S(20), S(8), S(14), S(8));
+            logoBox.AccessibleName = "Logo A3 PRO";
             System.IO.Stream logo = typeof(MainForm).Assembly.GetManifestResourceStream("A3Print.logo.png");
             if (logo != null) logoBox.Image = Image.FromStream(logo);
             header.Controls.Add(logoBox, 0, 0);
@@ -155,7 +188,7 @@ namespace A3Print
             header.Controls.Add(title, 1, 0);
 
             Label subtitle = new Label();
-            subtitle.Text = "Impression en lot des PDF FA / AV du jour";
+            subtitle.Text = "Impression en lot des PDF FA / AV";
             subtitle.AutoSize = true;
             subtitle.Anchor = AnchorStyles.Left | AnchorStyles.Top;
             subtitle.ForeColor = Theme.HeaderMuted;
@@ -173,13 +206,29 @@ namespace A3Print
             body.Padding = new Padding(S(20), S(16), S(20), S(8));
             body.ColumnCount = 1;
             body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            body.RowCount = 4;
+            body.RowCount = 5;
             body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             body.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
             body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-            // Question + actions sur la liste
+            body.Controls.Add(BuildTopBar(), 0, 0);
+            body.Controls.Add(BuildListCard(), 0, 1);
+            body.Controls.Add(BuildOptions(), 0, 2);
+
+            notice = new NoticeBar(scale);
+            notice.Dock = DockStyle.Fill;
+            notice.Margin = new Padding(0, S(12), 0, 0);
+            body.Controls.Add(notice, 0, 3);
+
+            body.Controls.Add(BuildRunBar(), 0, 4);
+            return body;
+        }
+
+        // Question, choix du jour et actions sur la liste.
+        private Control BuildTopBar()
+        {
             TableLayoutPanel top = new TableLayoutPanel();
             top.Dock = DockStyle.Fill;
             top.AutoSize = true;
@@ -201,16 +250,12 @@ namespace A3Print
             folderLabel.AutoSize = false;
             folderLabel.AutoEllipsis = true;
             folderLabel.Dock = DockStyle.Fill;
-            folderLabel.Height = S(20);
+            folderLabel.TextAlign = System.Drawing.ContentAlignment.MiddleLeft;
             folderLabel.ForeColor = Theme.Muted;
             folderLabel.Margin = new Padding(S(2), S(2), 0, 0);
             top.Controls.Add(folderLabel, 0, 1);
 
-            FlowLayoutPanel tools = new FlowLayoutPanel();
-            tools.AutoSize = true;
-            tools.WrapContents = false;
-            tools.Anchor = AnchorStyles.Right | AnchorStyles.Bottom;
-            tools.Margin = Padding.Empty;
+            FlowLayoutPanel tools = NewToolRow();
             checkAllButton = NewSecondaryButton("Tout cocher");
             checkAllButton.Click += delegate { SetAllChecked(true); };
             uncheckAllButton = NewSecondaryButton("Tout décocher");
@@ -221,112 +266,44 @@ namespace A3Print
             tools.Controls.Add(uncheckAllButton);
             tools.Controls.Add(refreshButton);
             top.Controls.Add(tools, 1, 0);
-            top.SetRowSpan(tools, 2);
-            body.Controls.Add(top, 0, 0);
 
-            body.Controls.Add(BuildListCard(), 0, 1);
-
-            // Options d'impression
-            FlowLayoutPanel options = new FlowLayoutPanel();
-            options.Dock = DockStyle.Fill;
-            options.AutoSize = true;
-            options.WrapContents = true;
-            options.BackColor = Theme.Card;
-            options.Padding = new Padding(S(10), S(8), S(10), S(8));
-            options.Margin = new Padding(0, S(12), 0, 0);
-            Theme.AddBorder(options);
-
-            options.Controls.Add(NewCaption("Imprimante"));
-            printerCombo = new ComboBox();
-            printerCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            printerCombo.FlatStyle = FlatStyle.Flat;
-            printerCombo.Width = S(310);
-            printerCombo.Margin = new Padding(S(3), S(3), S(18), S(3));
-            options.Controls.Add(printerCombo);
-
-            options.Controls.Add(NewCaption("Copies"));
-            copiesInput = new NumericUpDown();
-            copiesInput.Minimum = 1;
-            copiesInput.Maximum = 99;
-            copiesInput.Width = S(54);
-            copiesInput.Margin = new Padding(S(3), S(3), S(18), S(3));
-            options.Controls.Add(copiesInput);
-
-            options.Controls.Add(NewCaption("Mode"));
-            duplexCombo = new ComboBox();
-            duplexCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            duplexCombo.FlatStyle = FlatStyle.Flat;
-            duplexCombo.Width = S(200);
-            duplexCombo.Items.AddRange(new object[]
+            FlowLayoutPanel day = NewToolRow();
+            day.Margin = new Padding(0, S(8), 0, 0);
+            Label dayCaption = NewCaption("Documents du");
+            day.Controls.Add(dayCaption);
+            dayPicker = new DateTimePicker();
+            dayPicker.Format = DateTimePickerFormat.Short;
+            dayPicker.Width = S(120);
+            dayPicker.Margin = new Padding(S(4), S(2), 0, 0);
+            dayPicker.MaxDate = DateTime.Today.AddYears(1);
+            dayPicker.AccessibleName = "Jour des documents";
+            dayPicker.ValueChanged += delegate
             {
-                "Réglage de l'imprimante", "Recto seul", "Recto-verso (bord long)", "Recto-verso (bord court)"
-            });
-            options.Controls.Add(duplexCombo);
-            body.Controls.Add(options, 0, 2);
-
-            // Progression + boutons
-            TableLayoutPanel run = new TableLayoutPanel();
-            run.Dock = DockStyle.Fill;
-            run.AutoSize = true;
-            run.Margin = new Padding(0, S(14), 0, 0);
-            run.ColumnCount = 3;
-            run.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            run.RowCount = 2;
-            run.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-            run.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
-
-            progress = new ThinProgress();
-            progress.Height = S(6);
-            progress.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
-            progress.Margin = new Padding(0, 0, S(16), S(4));
-            run.Controls.Add(progress, 0, 0);
-
-            statusLabel = new Label();
-            statusLabel.AutoSize = false;
-            statusLabel.AutoEllipsis = true;
-            statusLabel.Dock = DockStyle.Fill;
-            statusLabel.ForeColor = Theme.Muted;
-            statusLabel.Margin = new Padding(0, 0, S(16), 0);
-            run.Controls.Add(statusLabel, 0, 1);
-
-            cancelButton = NewSecondaryButton("Annuler");
-            cancelButton.AutoSize = false;
-            cancelButton.Size = new Size(S(104), S(42));
-            cancelButton.Margin = new Padding(0, 0, S(8), 0);
-            cancelButton.Enabled = false;
-            cancelButton.Click += delegate
-            {
-                cancelButton.Enabled = false;
-                statusLabel.Text = "Annulation après le document en cours...";
-                worker.CancelAsync();
+                if (settingDay) return;
+                followToday = dayPicker.Value.Date == DateTime.Today;
+                RefreshList();
             };
-            run.Controls.Add(cancelButton, 1, 0);
-            run.SetRowSpan(cancelButton, 2);
-
-            printButton = new Button();
-            printButton.Text = "Imprimer";
-            printButton.FlatStyle = FlatStyle.Flat;
-            printButton.FlatAppearance.BorderSize = 0;
-            printButton.FlatAppearance.MouseOverBackColor = Theme.GreenDark;
-            printButton.FlatAppearance.MouseDownBackColor = Theme.GreenDark;
-            printButton.BackColor = Theme.Green;
-            printButton.ForeColor = Color.White;
-            printButton.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
-            printButton.Size = new Size(S(210), S(42));
-            printButton.Margin = Padding.Empty;
-            printButton.Cursor = Cursors.Hand;
-            printButton.EnabledChanged += delegate
+            day.Controls.Add(dayPicker);
+            todayButton = NewSecondaryButton("Aujourd'hui");
+            todayButton.Click += delegate
             {
-                printButton.BackColor = printButton.Enabled ? Theme.Green : Theme.Disabled;
+                followToday = true;
+                RefreshList();
             };
-            printButton.Click += PrintButton_Click;
-            run.Controls.Add(printButton, 2, 0);
-            run.SetRowSpan(printButton, 2);
-            body.Controls.Add(run, 0, 3);
+            day.Controls.Add(todayButton);
+            top.Controls.Add(day, 1, 1);
 
-            return body;
+            return top;
+        }
+
+        private FlowLayoutPanel NewToolRow()
+        {
+            FlowLayoutPanel row = new FlowLayoutPanel();
+            row.AutoSize = true;
+            row.WrapContents = false;
+            row.Anchor = AnchorStyles.Right;
+            row.Margin = Padding.Empty;
+            return row;
         }
 
         private Control BuildListCard()
@@ -353,10 +330,11 @@ namespace A3Print
             list.SmallImageList = rowHeight;
             list.HeaderStyle = ColumnHeaderStyle.Nonclickable;
             list.BackColor = Theme.Card;
-            list.Columns.Add("Document", S(380));
+            list.AccessibleName = "Documents à imprimer";
+            list.Columns.Add("Document", S(360));
             list.Columns.Add("Taille", S(90), HorizontalAlignment.Right);
             list.Columns.Add("Heure", S(80), HorizontalAlignment.Right);
-            list.Columns.Add("État", S(250));
+            list.Columns.Add("État", S(290));
             list.DrawColumnHeader += List_DrawColumnHeader;
             list.DrawSubItem += List_DrawSubItem;
             list.ItemCheck += List_ItemCheck;
@@ -376,12 +354,114 @@ namespace A3Print
             emptyLabel.ForeColor = Theme.Muted;
             emptyLabel.Font = new Font("Segoe UI", 11F);
             emptyLabel.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
-            emptyLabel.Text = "Aucun PDF FA / AV téléchargé aujourd'hui.\n\n" +
-                              "Téléchargez vos documents, puis cliquez sur Actualiser.";
 
             card.Controls.Add(list);
             card.Controls.Add(emptyLabel);
             return card;
+        }
+
+        private Control BuildOptions()
+        {
+            FlowLayoutPanel options = new FlowLayoutPanel();
+            options.Dock = DockStyle.Fill;
+            options.AutoSize = true;
+            options.WrapContents = true;
+            options.BackColor = Theme.Card;
+            options.Padding = new Padding(S(10), S(8), S(10), S(8));
+            options.Margin = new Padding(0, S(12), 0, 0);
+            Theme.AddBorder(options);
+
+            options.Controls.Add(NewCaption("Imprimante"));
+            printerCombo = new ComboBox();
+            printerCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            printerCombo.FlatStyle = FlatStyle.Flat;
+            printerCombo.Width = S(310);
+            printerCombo.Margin = new Padding(S(3), S(3), S(18), S(3));
+            printerCombo.AccessibleName = "Imprimante";
+            options.Controls.Add(printerCombo);
+
+            options.Controls.Add(NewCaption("Copies"));
+            copiesInput = new NumericUpDown();
+            copiesInput.Minimum = 1;
+            copiesInput.Maximum = 99;
+            copiesInput.Width = S(54);
+            copiesInput.Margin = new Padding(S(3), S(3), S(18), S(3));
+            copiesInput.AccessibleName = "Nombre de copies";
+            options.Controls.Add(copiesInput);
+
+            options.Controls.Add(NewCaption("Mode"));
+            duplexCombo = new ComboBox();
+            duplexCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            duplexCombo.FlatStyle = FlatStyle.Flat;
+            duplexCombo.Width = S(200);
+            duplexCombo.AccessibleName = "Recto ou recto-verso";
+            duplexCombo.Items.AddRange(new object[]
+            {
+                "Réglage de l'imprimante", "Recto seul", "Recto-verso (bord long)", "Recto-verso (bord court)"
+            });
+            options.Controls.Add(duplexCombo);
+            return options;
+        }
+
+        // Progression, statut et boutons d'action.
+        private Control BuildRunBar()
+        {
+            TableLayoutPanel run = new TableLayoutPanel();
+            run.Dock = DockStyle.Fill;
+            run.AutoSize = true;
+            run.Margin = new Padding(0, S(14), 0, 0);
+            run.ColumnCount = 3;
+            run.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            run.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            run.RowCount = 2;
+            run.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            run.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
+            progress = new ThinProgress();
+            progress.Height = S(6);
+            progress.Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;
+            progress.Margin = new Padding(0, 0, S(16), S(4));
+            progress.AccessibleName = "Progression";
+            run.Controls.Add(progress, 0, 0);
+
+            statusLabel = new Label();
+            statusLabel.AutoSize = false;
+            statusLabel.AutoEllipsis = true;
+            statusLabel.Dock = DockStyle.Fill;
+            statusLabel.ForeColor = Theme.Muted;
+            statusLabel.Margin = new Padding(0, 0, S(16), 0);
+            run.Controls.Add(statusLabel, 0, 1);
+
+            cancelButton = NewSecondaryButton("Arrêter");
+            cancelButton.AutoSize = false;
+            cancelButton.Size = new Size(S(104), S(42));
+            cancelButton.Margin = new Padding(0, 0, S(8), 0);
+            cancelButton.Enabled = false;
+            cancelButton.Click += CancelButton_Click;
+            run.Controls.Add(cancelButton, 1, 0);
+            run.SetRowSpan(cancelButton, 2);
+
+            printButton = new Button();
+            printButton.Text = "Imprimer";
+            printButton.FlatStyle = FlatStyle.Flat;
+            printButton.FlatAppearance.BorderSize = 0;
+            printButton.FlatAppearance.MouseOverBackColor = Theme.GreenDark;
+            printButton.FlatAppearance.MouseDownBackColor = Theme.GreenDark;
+            printButton.BackColor = Theme.Green;
+            printButton.ForeColor = Color.White;
+            printButton.Font = new Font("Segoe UI", 11F, FontStyle.Bold);
+            printButton.Size = new Size(S(210), S(42));
+            printButton.Margin = Padding.Empty;
+            printButton.Cursor = Cursors.Hand;
+            printButton.EnabledChanged += delegate
+            {
+                printButton.BackColor = printButton.Enabled ? Theme.Green : Theme.Disabled;
+            };
+            printButton.Click += PrintButton_Click;
+            run.Controls.Add(printButton, 2, 0);
+            run.SetRowSpan(printButton, 2);
+            return run;
         }
 
         private Control BuildFooter()
@@ -391,8 +471,9 @@ namespace A3Print
             footer.AutoSize = true;
             footer.Margin = Padding.Empty;
             footer.Padding = new Padding(S(20), S(4), S(20), S(10));
-            footer.ColumnCount = 2;
+            footer.ColumnCount = 3;
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
             footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
             Label version = new Label();
@@ -402,17 +483,32 @@ namespace A3Print
             version.Margin = Padding.Empty;
             footer.Controls.Add(version, 0, 0);
 
-            updateLink = new LinkLabel();
-            updateLink.Text = "Rechercher une mise à jour";
-            updateLink.AutoSize = true;
-            updateLink.LinkColor = Theme.GreenDark;
-            updateLink.ActiveLinkColor = Theme.Green;
-            updateLink.LinkBehavior = LinkBehavior.HoverUnderline;
-            updateLink.Margin = Padding.Empty;
-            updateLink.LinkClicked += delegate { CheckForUpdate(true); };
-            footer.Controls.Add(updateLink, 1, 0);
+            LinkLabel logLink = NewLink("Journal");
+            logLink.Margin = new Padding(0, 0, S(16), 0);
+            logLink.LinkClicked += delegate { OpenLog(); };
+            footer.Controls.Add(logLink, 1, 0);
+
+            updateLink = NewLink("Rechercher une mise à jour");
+            updateLink.LinkClicked += delegate
+            {
+                if (pendingUpdate != null) StartUpdate();
+                else CheckForUpdate(true);
+            };
+            footer.Controls.Add(updateLink, 2, 0);
 
             return footer;
+        }
+
+        private static LinkLabel NewLink(string text)
+        {
+            LinkLabel link = new LinkLabel();
+            link.Text = text;
+            link.AutoSize = true;
+            link.LinkColor = Theme.GreenDark;
+            link.ActiveLinkColor = Theme.Green;
+            link.LinkBehavior = LinkBehavior.HoverUnderline;
+            link.Margin = Padding.Empty;
+            return link;
         }
 
         private Button NewSecondaryButton(string text)
@@ -442,6 +538,21 @@ namespace A3Print
             label.Margin = new Padding(S(3), S(7), S(2), 0);
             return label;
         }
+
+        private void OpenLog()
+        {
+            try
+            {
+                Log.Write("Ouverture du journal");
+                Process.Start("notepad.exe", "\"" + Log.FilePath + "\"");
+            }
+            catch (Exception ex)
+            {
+                notice.ShowNotice(NoticeKind.Error, "Journal inaccessible", ex.Message + "  (" + Log.FilePath + ")", null, null, true);
+            }
+        }
+
+        // ---- Liste --------------------------------------------------------------------------------
 
         private void List_DrawColumnHeader(object sender, DrawListViewColumnHeaderEventArgs e)
         {
@@ -524,19 +635,24 @@ namespace A3Print
             fitting = false;
         }
 
-        // Pendant une impression les cases sont verrouillées.
+        // Pendant une impression ou une mise à jour les cases sont verrouillées.
         private void List_ItemCheck(object sender, ItemCheckEventArgs e)
         {
-            if (worker.IsBusy && !filling) e.NewValue = e.CurrentValue;
+            if (IsBusy && !filling) e.NewValue = e.CurrentValue;
         }
 
         // Un clic n'importe où sur la ligne coche ou décoche ; la case elle-même est gérée par Windows.
         private void List_MouseClick(object sender, MouseEventArgs e)
         {
-            if (e.Button != MouseButtons.Left || worker.IsBusy) return;
+            if (e.Button != MouseButtons.Left || IsBusy) return;
             ListViewHitTestInfo hit = list.HitTest(e.Location);
             if (hit.Item == null || hit.Location == ListViewHitTestLocations.StateImage) return;
             hit.Item.Checked = !hit.Item.Checked;
+        }
+
+        private bool IsBusy
+        {
+            get { return worker.IsBusy || updating; }
         }
 
         private void LoadPrinters()
@@ -553,7 +669,10 @@ namespace A3Print
             }
             catch (Exception ex)
             {
-                statusLabel.Text = "Liste des imprimantes illisible : " + ex.Message;
+                Log.Error("Liste des imprimantes", ex);
+                notice.ShowNotice(NoticeKind.Error, "Imprimantes illisibles",
+                    "Windows n'a pas renvoyé la liste des imprimantes (" + ex.Message + "). Vérifiez le service Spouleur d'impression, puis relancez A3Print.",
+                    null, null, true);
             }
 
             // Jamais d'imprimante virtuelle présélectionnée : 300 fenêtres « Enregistrer sous » sinon.
@@ -579,16 +698,27 @@ namespace A3Print
 
         private void RefreshList()
         {
+            if (followToday && dayPicker.Value.Date != DateTime.Today)
+            {
+                settingDay = true;
+                dayPicker.Value = DateTime.Today;
+                settingDay = false;
+            }
+            DateTime day = dayPicker.Value.Date;
+            bool isToday = day == DateTime.Today;
+            string dayText = isToday ? "aujourd'hui" : "le " + day.ToString("dd/MM/yyyy");
+
             List<DocItem> docs;
             string error = null;
             try
             {
-                docs = DocumentScanner.Scan(folder, DateTime.Today);
+                docs = DocumentScanner.Scan(folder, day);
             }
             catch (Exception ex)
             {
                 docs = new List<DocItem>();
                 error = "Lecture du dossier impossible : " + ex.Message;
+                Log.Error("Lecture du dossier " + folder, ex);
             }
 
             filling = true;
@@ -598,13 +728,14 @@ namespace A3Print
             foreach (DocItem doc in docs)
             {
                 bool already = settings.IsPrinted(doc);
+                bool uncertain = !already && journal.IsUncertain(doc);
                 ListViewItem row = new ListViewItem(doc.Name);
                 row.SubItems.Add(FormatSize(doc.Size));
                 row.SubItems.Add(doc.Time.ToString("HH:mm"));
-                row.SubItems.Add(already ? "Déjà imprimé" : "");
-                row.Checked = !already;
+                row.SubItems.Add(already ? "Déjà envoyé" : (uncertain ? "À vérifier : envoi coupé" : ""));
+                row.Checked = !already && !uncertain;
                 row.Tag = doc;
-                row.ForeColor = already ? Theme.Muted : Theme.Text;
+                row.ForeColor = already ? Theme.Muted : (uncertain ? Theme.Warning : Theme.Text);
                 list.Items.Add(row);
                 rows[doc] = row;
             }
@@ -613,11 +744,15 @@ namespace A3Print
 
             list.Visible = docs.Count > 0;
             emptyLabel.Visible = docs.Count == 0;
+            emptyLabel.Text = error != null
+                ? error
+                : "Aucun PDF FA / AV téléchargé " + dayText + ".\n\nTéléchargez vos documents, puis cliquez sur Actualiser.";
             FitColumns();
 
-            folderLabel.Text = folder + "  ·  " + DateTime.Today.ToString("dd/MM/yyyy");
+            todayButton.Enabled = !isToday && !IsBusy;
+            folderLabel.Text = folder;
             progress.Value = 0;
-            statusLabel.Text = error ?? "";
+            statusLabel.Text = "";
             UpdateQuestion();
         }
 
@@ -654,12 +789,34 @@ namespace A3Print
                 questionLabel.Text = "Imprimer " + (count == 1 ? "ce document" : "ces " + count + " documents") + " ?";
             }
             printButton.Text = count > 0 ? "Imprimer (" + count + ")" : "Imprimer";
-            printButton.Enabled = count > 0 && !worker.IsBusy;
+            printButton.Enabled = count > 0 && !IsBusy;
         }
+
+        // Un lot précédent ne s'est pas terminé proprement : on dit où on en est.
+        private void ShowInterruptedBatch()
+        {
+            if (!journal.Interrupted) return;
+
+            string when = journal.InterruptedAt == DateTime.MinValue ? "" : " du " + journal.InterruptedAt.ToString("dd/MM à HH:mm");
+            string text = "Le lot" + when + " vers « " + journal.InterruptedPrinter + " » a été coupé avant la fin. " +
+                          "Les documents déjà envoyés sont décochés, les autres restent cochés.";
+            if (journal.InterruptedDocName != null)
+            {
+                text += " « " + journal.InterruptedDocName + " » partait au moment de la coupure : vérifiez s'il est sorti avant de le recocher.";
+            }
+            notice.ShowNotice(NoticeKind.Warning, "Impression interrompue la dernière fois", text, "Compris",
+                delegate
+                {
+                    journal.End();
+                    notice.HideNotice();
+                }, false);
+        }
+
+        // ---- Impression ---------------------------------------------------------------------------
 
         private void PrintButton_Click(object sender, EventArgs e)
         {
-            if (worker.IsBusy) return;
+            if (IsBusy) return;
 
             PrintJob job = new PrintJob();
             job.Docs = new List<DocItem>();
@@ -671,8 +828,9 @@ namespace A3Print
 
             if (printerCombo.SelectedItem == null)
             {
-                MessageBox.Show(this, "Choisissez d'abord une imprimante.", AppName,
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                notice.ShowNotice(NoticeKind.Warning, "Aucune imprimante choisie",
+                    "Sélectionnez l'imprimante dans la liste ci-dessus, puis cliquez de nouveau sur Imprimer.", null, null, true);
+                printerCombo.Focus();
                 printerCombo.DroppedDown = true;
                 return;
             }
@@ -688,6 +846,16 @@ namespace A3Print
                 message += "\n\nAttention : imprimante virtuelle, elle risque de demander un nom de fichier pour chaque document.";
                 icon = MessageBoxIcon.Warning;
             }
+            if (!dryRun)
+            {
+                PrinterState state = PrinterMonitor.Check(job.Printer);
+                if (!state.Ready)
+                {
+                    message += "\n\nAttention : l'imprimante semble indisponible (" + state.Problem +
+                               "). L'impression se mettra en pause jusqu'à son retour.";
+                    icon = MessageBoxIcon.Warning;
+                }
+            }
             if (dryRun) message += "\n\n(Simulation : rien ne sera imprimé.)";
             if (MessageBox.Show(this, message, AppName, MessageBoxButtons.YesNo, icon) != DialogResult.Yes)
             {
@@ -701,12 +869,34 @@ namespace A3Print
 
             okCount = 0;
             failCount = 0;
+            paused = false;
             jobTotal = job.Docs.Count;
+            jobPrinter = job.Printer;
             progress.Maximum = jobTotal;
             progress.Value = 0;
+            progress.BarColor = Theme.GreenBright;
+            notice.HideNotice();
             statusLabel.Text = "Impression en cours...";
+            Native.SetTaskbar(Handle, TaskbarState.Normal, 0, jobTotal);
+            Log.Write("Lot : " + jobTotal + " document(s) vers " + job.Printer + (dryRun ? " (simulation)" : ""));
+            journal.Begin(job.Printer);
+            resumeSignal.Reset();
             SetBusy(true);
             worker.RunWorkerAsync(job);
+        }
+
+        private void CancelButton_Click(object sender, EventArgs e)
+        {
+            cancelButton.Enabled = false;
+            if (updating)
+            {
+                updateCancelled = true;
+                statusLabel.Text = "Annulation du téléchargement...";
+                return;
+            }
+            statusLabel.Text = "Arrêt après le document en cours...";
+            worker.CancelAsync();
+            resumeSignal.Set();
         }
 
         private void SetBusy(bool busy)
@@ -714,10 +904,13 @@ namespace A3Print
             checkAllButton.Enabled = !busy;
             uncheckAllButton.Enabled = !busy;
             refreshButton.Enabled = !busy;
+            dayPicker.Enabled = !busy;
+            todayButton.Enabled = !busy && dayPicker.Value.Date != DateTime.Today;
             printerCombo.Enabled = !busy;
             copiesInput.Enabled = !busy;
             duplexCombo.Enabled = !busy;
             updateLink.Enabled = !busy;
+            cancelButton.Text = updating ? "Annuler" : "Arrêter";
             cancelButton.Enabled = busy;
             printButton.Enabled = !busy && list.CheckedItems.Count > 0;
         }
@@ -725,23 +918,133 @@ namespace A3Print
         private void Worker_DoWork(object sender, DoWorkEventArgs e)
         {
             PrintJob job = (PrintJob)e.Argument;
-            for (int i = 0; i < job.Docs.Count; i++)
+            Native.KeepAwake(true);
+            try
             {
-                if (worker.CancellationPending)
+                int consecutiveFailures = 0;
+                for (int i = 0; i < job.Docs.Count; i++)
                 {
-                    e.Cancel = true;
-                    return;
-                }
+                    if (worker.CancellationPending)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
 
-                PrintResult result = new PrintResult();
-                result.Doc = job.Docs[i];
-                result.Ok = PdfPrinter.Print(result.Doc.Path, job.Printer, job.Copies, job.Duplex, dryRun, out result.Error);
-                worker.ReportProgress(i + 1, result);
+                    // Contrôle régulier : inutile d'empiler 300 travaux sur une imprimante hors ligne.
+                    if (!dryRun && i % PrinterCheckEvery == 0 && !WaitUntilPrinterReady(job.Printer))
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+
+                    PrintResult result = new PrintResult();
+                    result.Doc = job.Docs[i];
+                    bool stopped;
+
+                    // Ordre voulu pour une coupure : « en cours » écrit avant l'envoi, effacé après l'historique.
+                    journal.Sending(result.Doc);
+                    result.Ok = PrintWithRetry(result.Doc, job, out result.Error, out stopped);
+                    if (result.Ok && !dryRun) settings.MarkPrinted(result.Doc);
+                    journal.Sent();
+
+                    if (stopped)
+                    {
+                        e.Cancel = true;
+                        return;
+                    }
+                    worker.ReportProgress(i + 1, result);
+
+                    if (result.Ok)
+                    {
+                        consecutiveFailures = 0;
+                    }
+                    else if (++consecutiveFailures >= MaxConsecutiveFailures && i + 1 < job.Docs.Count)
+                    {
+                        consecutiveFailures = 0;
+                        string reason = MaxConsecutiveFailures + " documents de suite ont échoué (dernier : " + result.Error + ").";
+                        if (!Pause(reason, null))
+                        {
+                            e.Cancel = true;
+                            return;
+                        }
+                    }
+                }
             }
+            finally
+            {
+                Native.KeepAwake(false);
+            }
+        }
+
+        // Un refus net de l'imprimante est retenté : après son retour si elle est en panne, une fois sinon.
+        private bool PrintWithRetry(DocItem doc, PrintJob job, out string error, out bool stopped)
+        {
+            stopped = false;
+            for (int attempt = 1; ; attempt++)
+            {
+                bool retryable;
+                if (PdfPrinter.Print(doc.Path, job.Printer, job.Copies, job.Duplex, dryRun, out error, out retryable))
+                {
+                    return true;
+                }
+                Log.Write("Échec " + doc.Name + " (essai " + attempt + ") : " + error);
+                if (!retryable || dryRun) return false;
+
+                if (!PrinterMonitor.Check(job.Printer).Ready)
+                {
+                    if (!WaitUntilPrinterReady(job.Printer))
+                    {
+                        stopped = true;
+                        return false;
+                    }
+                    attempt = 0;
+                    continue;
+                }
+                if (attempt >= 2) return false;
+                Thread.Sleep(1500);
+            }
+        }
+
+        private bool WaitUntilPrinterReady(string printer)
+        {
+            PrinterState state = PrinterMonitor.Check(printer);
+            if (state.Ready) return true;
+            return Pause("Imprimante indisponible : " + state.Problem + ".", printer);
+        }
+
+        // Met le lot en pause. Reprise : bouton Reprendre, ou retour de l'imprimante si printer est fourni.
+        // Renvoie false si l'utilisateur arrête le lot.
+        private bool Pause(string reason, string printer)
+        {
+            Log.Write("Pause : " + reason);
+            resumeSignal.Reset();
+            PauseInfo info = new PauseInfo();
+            info.Paused = true;
+            info.Reason = reason;
+            info.AutoResume = printer != null;
+            worker.ReportProgress(-1, info);
+
+            while (true)
+            {
+                bool resumed = resumeSignal.WaitOne(PauseRecheckMs);
+                if (worker.CancellationPending) return false;
+                if (resumed || (printer != null && PrinterMonitor.Check(printer).Ready)) break;
+            }
+
+            Log.Write("Reprise");
+            worker.ReportProgress(-1, new PauseInfo());
+            return true;
         }
 
         private void Worker_ProgressChanged(object sender, ProgressChangedEventArgs e)
         {
+            PauseInfo pause = e.UserState as PauseInfo;
+            if (pause != null)
+            {
+                OnPauseChanged(pause);
+                return;
+            }
+
             PrintResult result = (PrintResult)e.UserState;
             ListViewItem row = rows[result.Doc];
 
@@ -749,10 +1052,9 @@ namespace A3Print
             if (result.Ok)
             {
                 okCount++;
-                row.SubItems[StateColumn].Text = dryRun ? "Simulé" : "Imprimé";
+                row.SubItems[StateColumn].Text = dryRun ? "Simulé" : "Envoyé à l'imprimante";
                 row.ForeColor = Theme.Success;
                 row.Checked = false;
-                if (!dryRun) settings.MarkPrinted(result.Doc);
             }
             else
             {
@@ -764,27 +1066,81 @@ namespace A3Print
 
             row.EnsureVisible();
             progress.Value = e.ProgressPercentage;
-            statusLabel.Text = e.ProgressPercentage + " / " + jobTotal + "  ·  " + result.Doc.Name;
+            Native.SetTaskbar(Handle, failCount > 0 ? TaskbarState.Error : TaskbarState.Normal, e.ProgressPercentage, jobTotal);
+            statusLabel.Text = e.ProgressPercentage + " / " + jobTotal + "  ·  " + result.Doc.Name +
+                               (failCount > 0 ? "  ·  " + failCount + " échec(s)" : "");
+        }
+
+        private void OnPauseChanged(PauseInfo pause)
+        {
+            paused = pause.Paused;
+            if (!pause.Paused)
+            {
+                notice.HideNotice();
+                progress.BarColor = Theme.GreenBright;
+                statusLabel.Text = "Reprise de l'impression...";
+                Native.SetTaskbar(Handle, TaskbarState.Normal, progress.Value, jobTotal);
+                return;
+            }
+
+            progress.BarColor = Theme.Warning;
+            statusLabel.Text = "En pause  ·  " + progress.Value + " / " + jobTotal + " envoyés";
+            Native.SetTaskbar(Handle, TaskbarState.Paused, progress.Value, jobTotal);
+            Native.Flash(Handle);
+            string text = pause.Reason + (pause.AutoResume
+                ? " L'impression reprendra toute seule dès que l'imprimante répondra. Rien n'est perdu."
+                : " Vérifiez l'imprimante puis reprenez, ou arrêtez : les documents restants resteront cochés.");
+            notice.ShowNotice(NoticeKind.Warning, "Impression en pause", text, "Reprendre",
+                delegate { resumeSignal.Set(); }, false);
         }
 
         private void Worker_Completed(object sender, RunWorkerCompletedEventArgs e)
         {
+            journal.End();
+            paused = false;
             SetBusy(false);
             UpdateQuestion();
+            progress.BarColor = Theme.GreenBright;
+            Native.SetTaskbar(Handle, TaskbarState.None, 0, 1);
 
-            string summary = okCount + " imprimé(s), " + failCount + " en échec";
-            if (e.Error != null) summary += ". Erreur : " + e.Error.Message;
-            else if (e.Cancelled) summary += ", annulé avant la fin (" + (jobTotal - okCount - failCount) + " non traité(s))";
-            statusLabel.Text = "Terminé : " + summary + ".";
+            int untreated = jobTotal - okCount - failCount;
+            string sent = okCount + " document(s) " + (dryRun ? "simulé(s)" : "envoyé(s) à « " + jobPrinter + " »");
+            Log.Write("Fin du lot : " + okCount + " envoyés, " + failCount + " échecs, " + untreated + " non traités" +
+                      (e.Error != null ? ", erreur : " + e.Error.Message : ""));
 
-            string text = summary + ".";
-            if (failCount > 0)
+            if (e.Error != null)
             {
-                text += "\n\nLes documents en échec restent cochés : cliquez de nouveau sur Imprimer pour réessayer.";
+                Log.Error("Lot d'impression", e.Error);
+                statusLabel.Text = "Interrompu par une erreur.";
+                notice.ShowNotice(NoticeKind.Error, "Impression interrompue par une erreur",
+                    e.Error.Message + "  " + sent + ", " + untreated + " non traité(s) restent cochés.",
+                    "Reprendre les restants", delegate { PrintButton_Click(this, EventArgs.Empty); }, true);
             }
-            MessageBox.Show(this, text, AppName, MessageBoxButtons.OK,
-                failCount > 0 || e.Error != null ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+            else if (e.Cancelled)
+            {
+                statusLabel.Text = "Arrêté : " + okCount + " / " + jobTotal + ".";
+                notice.ShowNotice(NoticeKind.Warning, "Impression arrêtée",
+                    sent + ", " + failCount + " en échec. Les " + untreated + " documents non traités restent cochés.",
+                    "Reprendre les restants", delegate { PrintButton_Click(this, EventArgs.Empty); }, true);
+            }
+            else if (failCount > 0)
+            {
+                statusLabel.Text = "Terminé avec " + failCount + " échec(s).";
+                notice.ShowNotice(NoticeKind.Warning, "Terminé avec " + failCount + " échec(s)",
+                    sent + ". Les documents en échec restent cochés, la raison est indiquée dans la colonne État.",
+                    "Réessayer les échecs", delegate { PrintButton_Click(this, EventArgs.Empty); }, true);
+            }
+            else
+            {
+                statusLabel.Text = "Terminé.";
+                notice.ShowNotice(NoticeKind.Success, "Impression terminée", sent + ".", null, null, true);
+            }
+
+            if (!ContainsFocus) Native.Flash(Handle);
+            if (closeWhenDone) Close();
         }
+
+        // ---- Mise à jour --------------------------------------------------------------------------
 
         private void CheckForUpdate(bool manual)
         {
@@ -800,95 +1156,165 @@ namespace A3Print
                 catch (Exception ex)
                 {
                     error = ex;
+                    Log.Error("Recherche de mise à jour", ex);
                 }
-
-                try
-                {
-                    BeginInvoke((MethodInvoker)delegate { OnUpdateChecked(info, error, manual); });
-                }
-                catch (InvalidOperationException)
-                {
-                    // Fenêtre fermée entre-temps.
-                }
+                Post(delegate { OnUpdateChecked(info, error, manual); });
             });
+        }
+
+        // Exécute sur le fil de l'interface, sans erreur si la fenêtre a été fermée entre-temps.
+        private void Post(MethodInvoker action)
+        {
+            try
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(action);
+            }
+            catch (InvalidOperationException)
+            {
+            }
         }
 
         private void OnUpdateChecked(UpdateInfo info, Exception error, bool manual)
         {
-            updateLink.Enabled = !worker.IsBusy;
+            updateLink.Enabled = !IsBusy;
 
-            if (info == null)
+            if (info != null)
             {
-                if (!manual) return;
-                if (error != null)
+                pendingUpdate = info;
+                updateLink.Text = "Installer la version " + info.Version;
+                // Un message plus important (pause, lot interrompu) n'est pas remplacé.
+                if (manual || (!notice.Visible && !IsBusy))
                 {
-                    MessageBox.Show(this, "Vérification impossible : " + error.Message, AppName,
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                }
-                else
-                {
-                    MessageBox.Show(this, AppName + " " + Updater.CurrentVersion + " est à jour.", AppName,
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    notice.ShowNotice(NoticeKind.Info, "Mise à jour disponible",
+                        "La version " + info.Version + " est prête (version actuelle : " + Updater.CurrentVersion +
+                        "). L'installation prend quelques secondes et relance A3Print.",
+                        "Installer", delegate { StartUpdate(); }, true);
                 }
                 return;
             }
 
-            if (worker.IsBusy) return;
-            DialogResult answer = MessageBox.Show(this,
-                "La version " + info.Version + " est disponible (version actuelle : " + Updater.CurrentVersion + ").\n\nInstaller maintenant ?",
-                "Mise à jour", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (answer != DialogResult.Yes) return;
+            if (!manual) return;
+            if (error != null)
+            {
+                notice.ShowNotice(NoticeKind.Error, "Vérification impossible", Updater.Describe(error),
+                    "Réessayer", delegate { CheckForUpdate(true); }, true);
+            }
+            else
+            {
+                notice.ShowNotice(NoticeKind.Success, "A3Print est à jour",
+                    "Version " + Updater.CurrentVersion + ", aucune version plus récente.", null, null, true);
+            }
+        }
 
-            Cursor = Cursors.WaitCursor;
-            Enabled = false;
-            statusLabel.Text = "Téléchargement de la mise à jour...";
+        private void StartUpdate()
+        {
+            if (IsBusy || pendingUpdate == null) return;
+
+            UpdateInfo info = pendingUpdate;
+            updating = true;
+            updateCancelled = false;
+            notice.HideNotice();
+            progress.Maximum = 100;
+            progress.Value = 0;
+            progress.BarColor = Theme.GreenBright;
+            statusLabel.Text = "Téléchargement de la version " + info.Version + "...";
+            Native.SetTaskbar(Handle, TaskbarState.Normal, 0, 100);
+            SetBusy(true);
+            Log.Write("Mise à jour vers " + info.Version);
+
             ThreadPool.QueueUserWorkItem(delegate
             {
+                string setup = null;
                 Exception failure = null;
                 try
                 {
-                    Updater.DownloadAndRun(info);
+                    setup = Updater.Download(info,
+                        delegate(int percent)
+                        {
+                            Post(delegate
+                            {
+                                if (!updating) return;
+                                progress.Value = percent;
+                                statusLabel.Text = "Téléchargement de la version " + info.Version + "  ·  " + percent + " %";
+                                Native.SetTaskbar(Handle, TaskbarState.Normal, percent, 100);
+                            });
+                        },
+                        delegate { return updateCancelled; });
                 }
                 catch (Exception ex)
                 {
                     failure = ex;
                 }
+                Post(delegate { OnUpdateDownloaded(info, setup, failure); });
+            });
+        }
 
+        private void OnUpdateDownloaded(UpdateInfo info, string setup, Exception failure)
+        {
+            if (failure == null)
+            {
                 try
                 {
-                    BeginInvoke((MethodInvoker)delegate
-                    {
-                        if (failure == null)
-                        {
-                            Application.Exit();
-                            return;
-                        }
-                        Enabled = true;
-                        Cursor = Cursors.Default;
-                        statusLabel.Text = "";
-                        MessageBox.Show(this, "Mise à jour impossible : " + failure.Message, AppName,
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    });
+                    statusLabel.Text = "Installation de la version " + info.Version + "...";
+                    cancelButton.Enabled = false;
+                    Updater.Launch(setup);
+                    Log.Write("Installeur lancé : " + setup);
+                    Application.Exit();
+                    return;
                 }
-                catch (InvalidOperationException)
+                catch (Exception ex)
                 {
+                    failure = new InvalidOperationException("L'installeur n'a pas pu démarrer (" + ex.Message + ").", ex);
                 }
-            });
+            }
+
+            updating = false;
+            SetBusy(false);
+            UpdateQuestion();
+            progress.Value = 0;
+            Native.SetTaskbar(Handle, TaskbarState.None, 0, 1);
+
+            if (failure is OperationCanceledException)
+            {
+                statusLabel.Text = "Mise à jour annulée.";
+                return;
+            }
+
+            Log.Error("Mise à jour", failure);
+            statusLabel.Text = "Mise à jour non installée.";
+            notice.ShowNotice(NoticeKind.Error, "Mise à jour non installée",
+                Updater.Describe(failure) + " Rien n'a été modifié : A3Print reste en version " + Updater.CurrentVersion + ".",
+                "Réessayer", delegate { StartUpdate(); }, true);
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (worker.IsBusy && e.CloseReason == CloseReason.UserClosing)
+            if (updating)
+            {
+                updateCancelled = true;
+            }
+            else if (worker.IsBusy && e.CloseReason == CloseReason.UserClosing && !closeWhenDone)
             {
                 DialogResult answer = MessageBox.Show(this,
-                    "Une impression est en cours. Quitter quand même ?\nLes documents déjà envoyés seront imprimés.",
+                    "Une impression est en cours (" + progress.Value + " / " + jobTotal + ").\n\n" +
+                    "Arrêter après le document en cours et quitter ?\nLes documents non envoyés resteront cochés à la réouverture.",
                     AppName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-                if (answer != DialogResult.Yes)
+                e.Cancel = true;
+                if (answer == DialogResult.Yes && worker.IsBusy)
                 {
-                    e.Cancel = true;
-                    return;
+                    // On laisse le document en cours partir en entier, puis Worker_Completed ferme la fenêtre.
+                    closeWhenDone = true;
+                    cancelButton.Enabled = false;
+                    statusLabel.Text = "Fermeture après le document en cours...";
+                    worker.CancelAsync();
+                    resumeSignal.Set();
                 }
-                worker.CancelAsync();
+                return;
+            }
+            else if (worker.IsBusy && closeWhenDone && e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                return;
             }
             base.OnFormClosing(e);
         }

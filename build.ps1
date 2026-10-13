@@ -41,7 +41,7 @@ $exeOut = Join-Path $build 'A3Print.exe'
     "/win32manifest:$(Join-Path $root 'src\app.manifest')" `
     "/win32icon:$(Join-Path $root 'assets\app.ico')" `
     "/resource:$(Join-Path $root 'assets\logo.png'),A3Print.logo.png" `
-    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll `
+    /r:System.dll /r:System.Core.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll /r:System.Management.dll `
     (Join-Path $root 'src\*.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Compilation echouee' }
 Copy-Item $sumatra $build -Force

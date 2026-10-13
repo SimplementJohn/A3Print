@@ -27,6 +27,22 @@ namespace A3Print
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            // Une erreur imprévue ne ferme pas l'application sans explication : elle est journalisée et affichée.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+            {
+                Log.Error("Erreur inattendue", e.Exception);
+                MessageBox.Show(
+                    "Une erreur inattendue est survenue :\n" + e.Exception.Message +
+                    "\n\nLes documents déjà envoyés restent mémorisés. Détail dans le journal :\n" + Log.FilePath,
+                    "A3Print", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+            {
+                Exception ex = e.ExceptionObject as Exception;
+                if (ex != null) Log.Error("Erreur fatale", ex);
+            };
+
             bool createdNew;
             using (Mutex mutex = new Mutex(true, "A3Print_SingleInstance", out createdNew))
             {
@@ -38,6 +54,7 @@ namespace A3Print
                 }
 
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                Log.Write("Démarrage A3Print " + Updater.CurrentVersion + (dryRun ? " (simulation)" : ""));
                 Application.Run(new MainForm(dryRun, folder));
             }
         }

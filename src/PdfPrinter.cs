@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Text;
 using System.Threading;
 
 namespace A3Print
@@ -28,13 +29,14 @@ namespace A3Print
         }
 
         // Imprime un fichier et attend la fin de l'envoi au spouleur.
-        public static bool Print(string file, string printer, int copies, DuplexMode duplex, bool dryRun, out string error)
+        // retryable : l'envoi a été refusé net, un second essai ne risque pas de doublon.
+        public static bool Print(string file, string printer, int copies, DuplexMode duplex, bool dryRun,
+            out string error, out bool retryable)
         {
-            error = null;
-
-            if (!File.Exists(file))
+            retryable = false;
+            error = Validate(file);
+            if (error != null)
             {
-                error = "fichier introuvable";
                 return false;
             }
             if (dryRun)
@@ -44,7 +46,7 @@ namespace A3Print
             }
             if (!File.Exists(EnginePath))
             {
-                error = "SumatraPDF.exe manquant dans le dossier d'installation";
+                error = "moteur d'impression absent (SumatraPDF.exe) : réinstallez A3Print";
                 return false;
             }
 
@@ -66,12 +68,13 @@ namespace A3Print
                     if (!process.WaitForExit(TimeoutMs))
                     {
                         try { process.Kill(); } catch (Exception) { }
-                        error = "délai dépassé";
+                        error = "pas de réponse de l'imprimante après 3 minutes (vérifiez si la page est sortie)";
                         return false;
                     }
                     if (process.ExitCode != 0)
                     {
-                        error = "échec impression (code " + process.ExitCode + ")";
+                        error = "envoi refusé par l'imprimante ou son pilote (code " + process.ExitCode + ")";
+                        retryable = true;
                         return false;
                     }
                 }
@@ -79,8 +82,38 @@ namespace A3Print
             }
             catch (Exception ex)
             {
-                error = ex.Message;
+                error = "moteur d'impression inaccessible : " + ex.Message;
                 return false;
+            }
+        }
+
+        // Écarte les fichiers qui ne peuvent pas s'imprimer avant de solliciter l'imprimante.
+        private static string Validate(string file)
+        {
+            try
+            {
+                FileInfo info = new FileInfo(file);
+                if (!info.Exists) return "fichier introuvable (déplacé ou supprimé)";
+                if (info.Length == 0) return "fichier vide (téléchargement incomplet ?)";
+
+                using (FileStream stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    byte[] head = new byte[1024];
+                    int read = stream.Read(head, 0, head.Length);
+                    if (Encoding.ASCII.GetString(head, 0, read).IndexOf("%PDF", StringComparison.Ordinal) < 0)
+                    {
+                        return "ce n'est pas un PDF valide (téléchargement incomplet ?)";
+                    }
+                }
+                return null;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return "accès au fichier refusé";
+            }
+            catch (IOException)
+            {
+                return "fichier verrouillé (encore en téléchargement ou ouvert ailleurs)";
             }
         }
     }

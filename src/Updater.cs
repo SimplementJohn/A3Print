@@ -7,6 +7,7 @@ using System.Net;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using System.Web.Script.Serialization;
 
 namespace A3Print
@@ -25,6 +26,8 @@ namespace A3Print
     {
         private const string ApiUrl = "https://api.github.com/repos/SimplementJohn/A3Print/releases/latest";
         private const string SetupPrefix = "A3Print-Setup";
+        private const int DownloadAttempts = 3;
+        private const int NetworkTimeoutMs = 20000;
 
         public static Version CurrentVersion
         {
@@ -80,28 +83,119 @@ namespace A3Print
             return info;
         }
 
-        // Télécharge, vérifie et lance l'installeur. L'appelant doit ensuite fermer l'application.
-        public static void DownloadAndRun(UpdateInfo info)
+        // Télécharge l'installeur dans un fichier .part, le contrôle par SHA-256, puis seulement le met en place :
+        // une coupure en cours de route ne laisse jamais d'installeur partiel exécutable.
+        // Trois essais en cas de coupure réseau. Lève OperationCanceledException si cancelled() devient vrai.
+        public static string Download(UpdateInfo info, Action<int> progress, Func<bool> cancelled)
         {
             string dir = Path.Combine(Path.GetTempPath(), "A3Print-update");
             Directory.CreateDirectory(dir);
             string setup = Path.Combine(dir, Path.GetFileName(info.SetupName));
+            string part = setup + ".part";
 
-            string expected;
-            using (WebClient client = NewClient())
+            Exception failure = null;
+            for (int attempt = 1; attempt <= DownloadAttempts; attempt++)
             {
-                expected = client.DownloadString(info.ShaUrl).Trim().Split(' ', '\t', '\r', '\n')[0];
-                client.DownloadFile(info.SetupUrl, setup);
+                try
+                {
+                    string expected;
+                    using (WebClient client = NewClient())
+                    {
+                        expected = client.DownloadString(info.ShaUrl).Trim().Split(' ', '\t', '\r', '\n')[0];
+                    }
+
+                    Fetch(info.SetupUrl, part, progress, cancelled);
+
+                    if (!string.Equals(expected, Sha256(part), StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new IOException("empreinte SHA-256 incorrecte, fichier corrompu");
+                    }
+
+                    SafeFile.Delete(setup);
+                    File.Move(part, setup);
+                    return setup;
+                }
+                catch (OperationCanceledException)
+                {
+                    SafeFile.Delete(part);
+                    throw;
+                }
+                catch (WebException ex)
+                {
+                    failure = ex;
+                }
+                catch (IOException ex)
+                {
+                    failure = ex;
+                }
+
+                Log.Write("Téléchargement de la mise à jour, essai " + attempt + " échoué : " + failure.Message);
+                SafeFile.Delete(part);
+                if (attempt < DownloadAttempts)
+                {
+                    Thread.Sleep(2000);
+                    if (cancelled()) throw new OperationCanceledException();
+                }
             }
 
-            string actual = Sha256(setup);
-            if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
-            {
-                File.Delete(setup);
-                throw new InvalidOperationException("Empreinte SHA-256 incorrecte : téléchargement corrompu, mise à jour annulée.");
-            }
+            throw new InvalidOperationException(
+                "Le téléchargement a été coupé " + DownloadAttempts + " fois (" + failure.Message + "). " +
+                "Vérifiez la connexion puis réessayez.", failure);
+        }
 
+        // Lance l'installeur silencieux, qui relance l'application. L'appelant doit ensuite fermer l'application.
+        public static void Launch(string setup)
+        {
             Process.Start(setup, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RELAUNCH=1");
+        }
+
+        // Message lisible pour une erreur de vérification ou de téléchargement.
+        public static string Describe(Exception ex)
+        {
+            if (ex is WebException || ex is IOException)
+            {
+                return "Serveur de mise à jour injoignable (" + ex.Message + "). Vérifiez la connexion Internet.";
+            }
+            return ex.Message;
+        }
+
+        private static void Fetch(string url, string target, Action<int> progress, Func<bool> cancelled)
+        {
+            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
+            request.UserAgent = "A3Print/" + CurrentVersion;
+            request.Timeout = NetworkTimeoutMs;
+            request.ReadWriteTimeout = NetworkTimeoutMs;
+
+            using (WebResponse response = request.GetResponse())
+            using (Stream source = response.GetResponseStream())
+            using (FileStream file = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                long total = response.ContentLength;
+                long done = 0;
+                int lastPercent = -1;
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    if (cancelled()) throw new OperationCanceledException();
+                    file.Write(buffer, 0, read);
+                    done += read;
+                    if (total > 0)
+                    {
+                        int percent = (int)(done * 100 / total);
+                        if (percent != lastPercent)
+                        {
+                            lastPercent = percent;
+                            progress(percent);
+                        }
+                    }
+                }
+                if (total > 0 && done != total)
+                {
+                    throw new IOException("téléchargement incomplet (" + done + " octets sur " + total + ")");
+                }
+                file.Flush(true);
+            }
         }
 
         private static WebClient NewClient()

@@ -7,11 +7,25 @@ un par un, dans l'ordre.
 ## Utilisation
 
 1. Lancer A3Print : la liste des PDF `FA*` / `AV*` téléchargés aujourd'hui s'affiche, tous cochés.
+   Le sélecteur « Documents du » affiche un autre jour, le bouton **Aujourd'hui** revient au jour courant.
 2. Décocher ce qui ne doit pas sortir, choisir l'imprimante (mémorisée ensuite), copies et recto-verso.
 3. **Imprimer**, puis confirmer.
 
-Les documents déjà imprimés sont retenus : à la réouverture ils apparaissent décochés, marqués
-« Déjà imprimé ». Les documents en échec restent cochés, un second clic sur **Imprimer** les renvoie.
+Les documents déjà envoyés sont retenus : à la réouverture ils apparaissent décochés, marqués
+« Déjà envoyé ». Les documents en échec restent cochés, un second clic sur **Imprimer** les renvoie.
+
+## Coupures et erreurs
+
+- **Imprimante hors ligne, sans papier, en bourrage** : le lot se met en pause et reprend tout seul
+  quand l'imprimante répond. L'état vient de Windows ; selon le pilote, une panne peut ne pas remonter.
+- **Trois échecs de suite** : pause, avec le choix de reprendre ou d'arrêter.
+- **Fichier vide, verrouillé ou qui n'est pas un PDF** : écarté avec la raison dans la colonne État.
+- **Fermeture, plantage ou coupure de courant en plein lot** : à la réouverture un bandeau le signale.
+  Les documents envoyés sont décochés, les autres restent cochés. Le document qui partait au moment de
+  la coupure est marqué « À vérifier » et décoché, pour éviter un doublon.
+- **Mise à jour coupée pendant le téléchargement** : trois essais, puis un message avec **Réessayer**.
+  Rien n'est installé tant que le fichier n'est pas complet et contrôlé.
+- Le lien **Journal** en bas de la fenêtre ouvre l'historique détaillé (`%LOCALAPPDATA%\A3Print\a3print.log`).
 
 Options de ligne de commande, pour les essais :
 
